@@ -1,0 +1,14 @@
+.venv/
+.idea/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+.transcripts/
+.task_outputs/
+.memory/
+.tasks/
+.agent_data/
+frontend/node_modules/
+frontend/dist/
