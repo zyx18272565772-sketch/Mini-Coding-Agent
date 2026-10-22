@@ -68,7 +68,7 @@ class SDKRoundTripTests(unittest.TestCase):
             step = len(requests)
             if step == 1:
                 self.assertEqual({item["name"] for item in body["tools"]},
-                                 {"bash", "read_file", "write_file", "edit_file", "glob", "load_skill", "compact", "task",
+                                 {"bash", "read_file", "search_files", "write_file", "edit_file", "glob", "load_skill", "compact", "task",
                                   "create_task", "update_task", "list_tasks", "get_task", "claim_task", "complete_task"})
                 calls = [("write_file", {"path": "nested/demo.py", "content": 'print("before")\n'})]
             elif step == 2:
@@ -84,7 +84,7 @@ class SDKRoundTripTests(unittest.TestCase):
                 results = body["messages"][-1]["content"]
                 self.assertEqual([item["tool_use_id"] for item in results],
                                  ["edit_file", "read_file", "glob", "bash"])
-                self.assertEqual(results[1]["content"], 'print("after")')
+                self.assertEqual(results[1]["content"], '1 | print("after")')
                 self.assertEqual(Path(results[2]["content"]).as_posix(), "nested/demo.py")
                 self.assertEqual(results[3]["content"], "after")
                 calls = []

@@ -8,6 +8,7 @@ from hook import trigger_hooks
 from llm.client import MODEL, client
 from llm.generation import create_message
 from llm.usage import run_usage
+from mcp_client.runtime import github_mcp_scope, extend_tools
 from tool import workspace
 from tool.compact import COMPACT_REQUESTED
 from tool.executor import execute_tool
@@ -32,11 +33,12 @@ def run_subagent(prompt: str) -> str:
 
 
 def _run_subagent(prompt: str) -> str:
-    with BackgroundManager(workspace.WORKDIR) as background:
-        return _run_subagent_loop(prompt, background)
+    with github_mcp_scope() as mcp, BackgroundManager(workspace.WORKDIR) as background:
+        return _run_subagent_loop(prompt, background, mcp)
 
 
-def _run_subagent_loop(prompt: str, background: BackgroundManager) -> str:
+def _run_subagent_loop(prompt: str, background: BackgroundManager, mcp=None) -> str:
+    tools, handlers = extend_tools(SUB_TOOLS, SUB_HANDLERS, mcp)
     print("\n[子智能体开始]")
     messages = [{"role": "user", "content": prompt}]
     compactor = ContextCompactor(
@@ -52,7 +54,7 @@ def _run_subagent_loop(prompt: str, background: BackgroundManager) -> str:
                 client, on_event=emit if streaming_enabled() else None,
                 purpose="subagent",
                 model=MODEL, system=SUB_SYSTEM, messages=messages,
-                tools=SUB_TOOLS, max_tokens=8000,
+                tools=tools, max_tokens=8000,
             )
             reactive_retries = 0
         except Exception as error:
@@ -81,15 +83,18 @@ def _run_subagent_loop(prompt: str, background: BackgroundManager) -> str:
         results = []
         compact_requested = False
         for block in tool_calls:
-            output, allowed = execute_tool(block, SUB_HANDLERS, background=background)
+            output, allowed = execute_tool(block, handlers, background=background)
             if allowed and block.name == "compact" and output == COMPACT_REQUESTED:
                 compact_requested = True
             print(f"  [子工具] {block.name}：{output[:100]}")
-            results.append({
+            result = {
                 "type": "tool_result",
                 "tool_use_id": block.id,
-                "content": output,
-            })
+                "content": str(output),
+            }
+            if getattr(output, "is_error", False) or (block.name.startswith("mcp__") and not allowed):
+                result["is_error"] = True
+            results.append(result)
         messages.append({"role": "user", "content": results})
         if compact_requested:
             messages[:] = compactor.compact_history(messages, prompt)

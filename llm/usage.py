@@ -13,8 +13,8 @@ _current = ContextVar("model_usage_run", default=None)
 
 
 class UsageRun:
-    def __init__(self, previous=None, report=None):
-        self.run_id = previous["run_id"] if previous else uuid4().hex
+    def __init__(self, previous=None, report=None, *, run_id=None):
+        self.run_id = previous["run_id"] if previous else run_id or uuid4().hex
         self.by_purpose = {name: dict.fromkeys(COUNTERS, 0) for name in PURPOSES}
         if previous:
             for name in PURPOSES:
@@ -66,12 +66,12 @@ def current_run():
 
 
 @contextmanager
-def run_usage(*, previous=None, report=None):
+def run_usage(*, previous=None, report=None, run_id=None):
     existing = current_run()
     if existing is not None:
         yield existing
         return
-    run = UsageRun(previous, report)
+    run = UsageRun(previous, report, run_id=run_id)
     token = _current.set(run)
     try:
         run.publish()

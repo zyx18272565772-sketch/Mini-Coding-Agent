@@ -1,23 +1,25 @@
 import React, { memo, useState } from 'react';
 import { AlertCircle, Check, ChevronRight, FilePenLine, FileText, LoaderCircle, Search, ShieldX, Square, Terminal, Workflow } from 'lucide-react';
 
-const toolLabels = { bash: '执行命令', read_file: '读取文件', write_file: '写入文件', edit_file: '编辑文件', glob: '查找文件', todo_write: '更新计划（旧记录）', task: '委派子任务', load_skill: '加载技能', compact: '压缩上下文', create_task: '创建任务', update_task: '设置任务依赖', list_tasks: '查看任务列表', get_task: '读取任务详情', claim_task: '领取任务', complete_task: '完成任务' };
-const icons = { bash: Terminal, read_file: FileText, write_file: FilePenLine, edit_file: FilePenLine, glob: Search, task: Workflow };
+const toolLabels = { bash: '执行命令', read_file: '读取文件', search_files: '搜索文件内容', write_file: '写入文件', edit_file: '编辑文件', glob: '查找文件', todo_write: '更新计划（旧记录）', task: '委派子任务', load_skill: '加载技能', compact: '压缩上下文', create_task: '创建任务', update_task: '设置任务依赖', list_tasks: '查看任务列表', get_task: '读取任务详情', claim_task: '领取任务', complete_task: '完成任务' };
+const icons = { bash: Terminal, read_file: FileText, search_files: Search, write_file: FilePenLine, edit_file: FilePenLine, glob: Search, task: Workflow };
+const githubLabels = { search_repositories: '搜索仓库', get_file_contents: '读取仓库文件', search_code: '搜索代码', list_issues: '列出 Issue', issue_read: '读取 Issue', list_pull_requests: '列出 PR', pull_request_read: '读取 PR' };
 
 export default memo(function ToolCard({ row }) {
   const [expanded, setExpanded] = useState(false);
   const [fullOutput, setFullOutput] = useState(false);
+  const githubTool = row.name?.startsWith('mcp__github__') ? row.name.slice('mcp__github__'.length) : null;
   const Icon = icons[row.name] || Workflow;
   const active = ['running', 'background'].includes(row.status);
   const StatusIcon = active ? LoaderCircle : row.status === 'denied' ? ShieldX : row.status === 'stopped' ? Square : ['failed', 'error'].includes(row.status) ? AlertCircle : Check;
   const labels = { running: '执行中', background: '后台运行中', completed: '已返回', denied: '已拒绝', stopped: '已停止', failed: '执行失败', error: '已中断' };
-  const preview = row.args?.path || row.args?.command || row.args?.pattern || row.args?.name || row.args?.subject || row.args?.task_id || '';
+  const preview = githubTool ? (row.args?.owner && row.args?.repo ? `${row.args.owner}/${row.args.repo}` : row.args?.query || '') : row.name === 'search_files' ? row.args?.query || '' : row.args?.path || row.args?.command || row.args?.pattern || row.args?.name || row.args?.subject || row.args?.task_id || '';
   const output = row.output || '';
   const bodyId = `tool-${row.seq}`;
   return <div className={`tool-card tool-${row.status}`}>
     <button className="tool-toggle" onClick={() => setExpanded(value => !value)} aria-expanded={expanded} aria-controls={bodyId}>
       <ChevronRight size={14} className={expanded ? 'rotated' : ''} /><Icon size={15} />
-      <span className="tool-name">{toolLabels[row.name] || row.name}</span>
+      <span className="tool-name">{githubTool ? `GitHub MCP · ${githubLabels[githubTool] || githubTool}` : toolLabels[row.name] || row.name}</span>
       {row.scope === 'subagent' && <span className="subagent-tag">子智能体</span>}
       <span className="tool-preview">{String(preview)}</span>
       <span className={`tool-status ${row.status}`}><StatusIcon size={13} className={active ? 'spin' : ''} /><span>{labels[row.status]}</span></span>

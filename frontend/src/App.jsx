@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { AlertCircle, ChevronRight, FolderOpen, PanelLeftOpen, RefreshCw, X } from 'lucide-react';
 import { useDesktop } from './useDesktop.js';
 import { folderName, statusLabels } from './state.js';
@@ -31,11 +31,15 @@ export default function App() {
   const [drafts, setDrafts] = useState({});
   const [quotes, setQuotes] = useState({});
   const [references, setReferences] = useState({});
+  const [sending, setSending] = useState(null);
+  const sendInFlight = useRef(false);
   const id = current?.id;
   const projectName = projects.find(project => project.id === current?.project_id)?.name;
   const draft = drafts[id] || '';
   const quote = quotes[id];
   const attachments = references[id] || [];
+  const pendingMessage = sending && sending.sessionId === id && !current.events.some(event =>
+    event.seq > sending.after && event.type === 'user' && event.text === sending.text) ? sending : null;
   const setDraft = text => setDrafts(previous => ({ ...previous, [id]: text }));
   const chooseFolder = () => id && perform('choose_workspace', id);
   async function addAttachment(kind) {
@@ -47,14 +51,23 @@ export default function App() {
     });
   }
   async function send() {
+    if (!id || busy || sendInFlight.current) return;
+    sendInFlight.current = true;
     const sentId = id;
     const sentDraft = draft;
     const sentQuote = quote;
     const sentAttachments = attachments;
-    if (await perform('send_message', sentId, buildRequest(sentDraft, sentQuote, sentAttachments))) {
-      setDrafts(previous => previous[sentId] === sentDraft ? { ...previous, [sentId]: '' } : previous);
-      setQuotes(previous => previous[sentId] === sentQuote ? { ...previous, [sentId]: null } : previous);
-      setReferences(previous => ({ ...previous, [sentId]: (previous[sentId] || []).filter(item => !sentAttachments.includes(item)) }));
+    const text = buildRequest(sentDraft, sentQuote, sentAttachments);
+    setSending({ sessionId: sentId, text, after: current.events.at(-1)?.seq || 0 });
+    try {
+      if (await perform('send_message', sentId, text)) {
+        setDrafts(previous => previous[sentId] === sentDraft ? { ...previous, [sentId]: '' } : previous);
+        setQuotes(previous => previous[sentId] === sentQuote ? { ...previous, [sentId]: null } : previous);
+        setReferences(previous => ({ ...previous, [sentId]: (previous[sentId] || []).filter(item => !sentAttachments.includes(item)) }));
+      }
+    } finally {
+      sendInFlight.current = false;
+      setSending(null);
     }
   }
   function selectSession(sessionId) {
@@ -84,10 +97,10 @@ export default function App() {
       <header className="topbar">
         {!sidebarOpen && <button className="icon-button" onClick={() => setSidebarOpen(true)} aria-label="展开侧栏" title="展开侧栏"><PanelLeftOpen size={18} /></button>}
         <div className="header-title"><span className="header-project" title={current?.workdir}><FolderOpen size={14} />{projectName || folderName(current?.workdir) || '工作区'}</span><ChevronRight className="breadcrumb-slash" size={13} /><span className="conversation-title">{current?.title || '新会话'}</span></div>
-        <div className={`status-pill ${current?.status || 'idle'}`} role="status"><span />{loading ? '载入中' : statusLabels[current?.status] || '未连接'}</div>
+        <div className={`status-pill ${pendingMessage ? 'running' : current?.status || 'idle'}`} role="status"><span />{loading ? '载入中' : pendingMessage ? '正在发送' : statusLabels[current?.status] || '未连接'}</div>
       </header>
       {error && <div className="error-banner" role="alert"><AlertCircle size={16} /><span>{error}</span>{!current && <button className="text-button" onClick={initialize}><RefreshCw size={14} />重试连接</button>}<button className="icon-button" onClick={dismissError} aria-label="关闭错误提示"><X size={15} /></button></div>}
-      <Conversation key={current?.id || 'empty'} session={current} projectName={projectName} loading={loading} onSuggestion={setDraft} onQuote={value => setQuotes(previous => ({ ...previous, [id]: value }))} />
+      <Conversation key={current?.id || 'empty'} session={current} projectName={projectName} loading={loading} pendingMessage={pendingMessage} onSuggestion={setDraft} onQuote={value => setQuotes(previous => ({ ...previous, [id]: value }))} />
       <div className="conversation-controls">
       {!loading && <ProjectTasks key={current?.id} tasks={current?.tasks} error={current?.task_error} sessionId={current?.id} />}
       <UsagePanel session={current} loading={loading} />

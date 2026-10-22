@@ -27,5 +27,6 @@ def execute_tool(block, handlers: dict, *, background=None) -> tuple[str, bool]:
     except Exception as exc:
         output = f"错误：{exc}"
     trigger_hooks("PostToolUse", block, output)
-    emit("tool_result", call_id=block.id, name=block.name, output=str(output), allowed=True)
-    return str(output), True
+    metadata = {"is_error": output.is_error} if hasattr(output, "is_error") else {}
+    emit("tool_result", call_id=block.id, name=block.name, output=str(output), allowed=True, **metadata)
+    return output if isinstance(output, str) else str(output), True

@@ -24,11 +24,11 @@ class FileToolTests(unittest.TestCase):
         self.patcher.start()
         self.addCleanup(self.patcher.stop)
 
-    def test_fourteen_tools_have_matching_definitions_and_handlers(self):
-        expected = {"bash", "read_file", "write_file", "edit_file", "glob", "load_skill", "compact", "task",
+    def test_fifteen_tools_have_matching_definitions_and_handlers(self):
+        expected = {"bash", "read_file", "search_files", "write_file", "edit_file", "glob", "load_skill", "compact", "task",
                     "create_task", "update_task", "list_tasks", "get_task", "claim_task", "complete_task"}
         self.assertEqual({item["name"] for item in TOOLS}, expected)
-        self.assertEqual(len(TOOLS), 14)
+        self.assertEqual(len(TOOLS), 15)
         self.assertEqual(set(TOOL_HANDLERS), expected)
 
     def test_write_creates_parent_directories_and_read_preserves_unicode(self):
@@ -37,19 +37,104 @@ class FileToolTests(unittest.TestCase):
 
         self.assertNotIn("错误：", result)
         self.assertEqual((self.workdir / "nested/demo.txt").read_text(encoding="utf-8"), content)
-        self.assertEqual(run_read("nested/demo.txt"), "你好 Agent\nsecond line")
+        self.assertEqual(run_read("nested/demo.txt"), "1 | 你好 Agent\n2 | second line")
 
     def test_read_limit_reports_remaining_lines(self):
         (self.workdir / "demo.txt").write_text("one\ntwo\nthree", encoding="utf-8")
-        self.assertEqual(run_read("demo.txt", limit=1), "one\n...（还有 2 行未显示）")
+        result = run_read("demo.txt", limit=1)
+        self.assertTrue(result.startswith("1 | one\n"))
+        self.assertIn("start_line=2", result)
+
+    def test_read_selects_inclusive_line_range(self):
+        (self.workdir / "demo.txt").write_text("one\ntwo\nthree\nfour\n", encoding="utf-8")
+        result = run_read("demo.txt", start_line=2, end_line=3)
+        self.assertTrue(result.startswith("2 | two\n3 | three\n"))
+        self.assertNotIn("1 | one", result)
+        self.assertIn("start_line=4", result)
+
+    def test_read_default_page_is_bounded_and_can_continue(self):
+        (self.workdir / "demo.txt").write_text("x\n" * 205, encoding="utf-8")
+        first = run_read("demo.txt")
+        self.assertIn("200 | x", first)
+        self.assertNotIn("201 | x", first)
+        self.assertIn("start_line=201", first)
+        self.assertEqual(run_read("demo.txt", start_line=201),
+                         "201 | x\n202 | x\n203 | x\n204 | x\n205 | x")
+
+    def test_read_rejects_invalid_ranges_and_conflicting_options(self):
+        file_path = self.workdir / "demo.txt"
+        file_path.write_text("one\ntwo", encoding="utf-8")
+        for arguments in ({"start_line": 0}, {"limit": -1}, {"limit": True},
+                          {"end_line": 0}, {"start_line": 3, "end_line": 2},
+                          {"limit": 1, "end_line": 2}):
+            with self.subTest(arguments=arguments):
+                self.assertTrue(run_read("demo.txt", **arguments).startswith("错误："))
+
+    def test_read_binary_file_returns_clear_error(self):
+        (self.workdir / "data.bin").write_bytes(b"text\x00data")
+        self.assertIn("二进制", run_read("data.bin"))
+
+    def test_read_long_line_has_bounded_output_and_explicit_warning(self):
+        (self.workdir / "long.txt").write_text("a" * 100_000 + "\ntail\n", encoding="utf-8")
+        result = run_read("long.txt")
+        self.assertLess(len(result), 21_000)
+        self.assertIn("截断", result)
+        self.assertIn("start_line=2", result)
+
+    def test_read_does_not_decode_unrequested_tail(self):
+        (self.workdir / "mixed.txt").write_bytes(b"wanted\nnext\n" + b"\xff" * 100_000)
+        result = run_read("mixed.txt", end_line=1)
+        self.assertTrue(result.startswith("1 | wanted"))
+        self.assertIn("start_line=2", result)
+
+    def test_read_empty_file_and_range_past_end_are_explicit(self):
+        (self.workdir / "empty.txt").touch()
+        self.assertIn("空文件", run_read("empty.txt"))
+        (self.workdir / "demo.txt").write_text("one", encoding="utf-8")
+        self.assertIn("超过文件末尾", run_read("demo.txt", start_line=10))
 
     def test_read_missing_file_returns_error_text(self):
         self.assertTrue(run_read("missing.txt").startswith("错误："))
 
-    def test_edit_replaces_only_first_occurrence(self):
+    def test_edit_ambiguous_match_does_not_modify_file(self):
         (self.workdir / "demo.txt").write_text("old old", encoding="utf-8")
-        self.assertEqual(run_edit("demo.txt", "old", "new"), "已修改文件：demo.txt")
-        self.assertEqual((self.workdir / "demo.txt").read_text(encoding="utf-8"), "new old")
+        result = run_edit("demo.txt", "old", "new")
+        self.assertTrue(result.startswith("错误："))
+        self.assertIn("2", result)
+        self.assertIn("上下文", result)
+        self.assertEqual((self.workdir / "demo.txt").read_text(encoding="utf-8"), "old old")
+
+    def test_edit_unique_context_targets_only_intended_occurrence(self):
+        file_path = self.workdir / "demo.txt"
+        file_path.write_text("first: old\nsecond: old\n", encoding="utf-8")
+        self.assertTrue(run_edit("demo.txt", "second: old", "second: new").startswith("已修改"))
+        self.assertEqual(file_path.read_text(encoding="utf-8"), "first: old\nsecond: new\n")
+
+    def test_edit_replace_all_requires_explicit_option(self):
+        file_path = self.workdir / "demo.txt"
+        file_path.write_text("old old", encoding="utf-8")
+        result = run_edit("demo.txt", "old", "new", replace_all=True)
+        self.assertIn("2", result)
+        self.assertEqual(file_path.read_text(encoding="utf-8"), "new new")
+
+    def test_edit_empty_old_text_is_rejected(self):
+        file_path = self.workdir / "demo.txt"
+        file_path.write_text("original", encoding="utf-8")
+        self.assertTrue(run_edit("demo.txt", "", "prefix").startswith("错误："))
+        self.assertEqual(file_path.read_text(encoding="utf-8"), "original")
+
+    def test_edit_preserves_bom_and_windows_line_endings(self):
+        file_path = self.workdir / "demo.txt"
+        file_path.write_bytes(b"\xef\xbb\xbffirst\r\nsecond\r\nthird\r\n")
+        result = run_edit("demo.txt", "first\nsecond", "first\nchanged")
+        self.assertTrue(result.startswith("已修改"))
+        self.assertEqual(file_path.read_bytes(), b"\xef\xbb\xbffirst\r\nchanged\r\nthird\r\n")
+
+    def test_edit_binary_file_is_rejected(self):
+        file_path = self.workdir / "data.bin"
+        file_path.write_bytes(b"old\x00data")
+        self.assertIn("二进制", run_edit("data.bin", "old", "new"))
+        self.assertEqual(file_path.read_bytes(), b"old\x00data")
 
     def test_edit_missing_text_leaves_file_unchanged(self):
         file_path = self.workdir / "demo.txt"

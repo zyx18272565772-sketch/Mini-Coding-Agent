@@ -43,7 +43,7 @@ class SubagentIntegrationTests(unittest.TestCase):
             elif step == 2:
                 self.assertEqual(body["messages"], [{"role": "user", "content": delegated_prompt}])
                 self.assertEqual({item["name"] for item in body["tools"]},
-                                 {"bash", "read_file", "write_file", "edit_file", "glob", "load_skill", "compact"})
+                                 {"bash", "read_file", "search_files", "write_file", "edit_file", "glob", "load_skill", "compact"})
                 self.assertEqual(body["model"], requests[0]["model"])
                 self.assertNotEqual(body["system"], requests[0]["system"])
                 content = [{"type": "text", "text": "子任务的中间分析"},
@@ -54,7 +54,7 @@ class SubagentIntegrationTests(unittest.TestCase):
                 content = [{"type": "tool_use", "id": "child_read", "name": "read_file",
                             "input": {"path": "child.txt"}}]
             elif step == 4:
-                self.assertEqual(body["messages"][-1]["content"][0]["content"], internal_details)
+                self.assertEqual(body["messages"][-1]["content"][0]["content"], "1 | " + internal_details)
                 content = [{"type": "text", "text": summary}]
             else:
                 self.assertEqual(step, 5)

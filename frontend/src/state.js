@@ -10,6 +10,7 @@ export function taskStatus(task) {
 }
 
 export function mergeEvents(previous, incoming) {
+  if (!incoming.length) return previous;
   return [...new Map([...previous, ...incoming].map(event => [event.seq, event])).values()]
     .sort((a, b) => a.seq - b.seq);
 }
@@ -40,7 +41,7 @@ export function buildTimeline(events) {
     } else if (event.type === 'tool_result') {
       const row = tools.get(key);
       if (row) Object.assign(row, { output: event.output, task_id: event.task_id,
-        status: event.allowed ? (event.background ? 'background' : 'completed') : 'denied' });
+        status: event.allowed ? (event.is_error ? 'failed' : event.background ? 'background' : 'completed') : 'denied' });
     } else if (event.type === 'background_result') {
       const row = tools.get(key);
       if (row && row.task_id === event.task_id) Object.assign(row, { output: event.output, exit_code: event.exit_code,

@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+import pickle
 import signal
 import subprocess
 from uuid import uuid4
@@ -10,15 +11,39 @@ from desktop_app.store import to_plain
 from llm.errors import describe_failure
 
 
+def send_packet(connection, value):
+    # 使用独立 bytes，避免 Windows 写入已断开的管道时仍持有 BytesIO 导出缓冲区。
+    connection.send_bytes(pickle.dumps(to_plain(value)))
+
+
 def run_worker_entry(connection, payload, target):
     """先确认工作进程已进入 Python，再允许窗口停止整棵进程树。"""
     if os.name != "nt":
         os.setsid()
-    connection.send({"type": "worker_ready"})
+    try:
+        send_packet(connection, {"type": "worker_ready"})
+        if payload is None:
+            payload = connection.recv()
+    except (EOFError, OSError):
+        connection.close()
+        return
     target(connection, payload)
 
 
 def run_worker(connection, payload):
+    disconnected = False
+
+    def report(event):
+        nonlocal disconnected
+        if disconnected:
+            return
+        try:
+            send_packet(connection, event)
+        except (EOFError, OSError):
+            disconnected = True
+            # 接收端消失后停止执行；finally 中的用量回报不能再次写入断管道。
+            raise SystemExit(0) from None
+
     if os.name != "nt":
         if os.getsid(0) != os.getpid():
             os.setsid()
@@ -27,6 +52,8 @@ def run_worker(connection, payload):
             raise SystemExit(128 + signum)
         signal.signal(signal.SIGTERM, terminate)
     try:
+        if payload.get("storage_backend"):
+            os.environ["STORAGE_BACKEND"] = payload["storage_backend"]
         # 先设定工具工作目录，再导入会读取目录的系统提示词。
         os.chdir(Path(__file__).resolve().parents[1])
         from tool import workspace
@@ -38,15 +65,17 @@ def run_worker(connection, payload):
         from tool.task_system import configure_owner
         configure_owner(payload.get("session_id", "agent"))
 
-        def report(event):
-            connection.send(to_plain(event))
-
         def approve(tool, args, reason, scope):
+            nonlocal disconnected
             request_id = uuid4().hex
             report({"type": "permission", "request_id": request_id, "scope": scope,
                     "tool": tool, "args": args, "reason": reason})
             while True:
-                answer = connection.recv()
+                try:
+                    answer = connection.recv()
+                except (EOFError, OSError):
+                    disconnected = True
+                    raise SystemExit(0) from None
                 if answer.get("request_id") == request_id:
                     return "allow" if answer.get("allow") is True else "deny"
 
@@ -60,10 +89,17 @@ def run_worker(connection, payload):
         options = {}
         if payload.get("previous_usage") is not None:
             options = {"previous_usage": payload["previous_usage"]}
-        agent_loop(messages, query, **options)
+        if payload.get("run_id"):
+            options["run_id"] = payload["run_id"]
+        from storage.context import storage_scope
+        with storage_scope(session_id=payload.get("session_id"), run_id=payload.get("run_id")):
+            agent_loop(messages, query, **options)
         report({"type": "done", "status": "completed"})
     except Exception as error:
-        connection.send({"type": "failure", **describe_failure(error)})
+        try:
+            report({"type": "failure", **describe_failure(error)})
+        except SystemExit:
+            pass
     finally:
         connection.close()
 

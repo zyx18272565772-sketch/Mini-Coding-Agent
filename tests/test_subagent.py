@@ -62,7 +62,7 @@ class SubagentTests(unittest.TestCase):
         result = self.run_replies([[{"type": "text", "text": "检查完成"}]])
         self.assertEqual(result, "检查完成")
         self.assertEqual(self.received[0]["messages"], [{"role": "user", "content": "检查模块并返回结论"}])
-        expected = {"bash", "read_file", "write_file", "edit_file", "glob", "load_skill", "compact"}
+        expected = {"bash", "read_file", "search_files", "write_file", "edit_file", "glob", "load_skill", "compact"}
         self.assertEqual({item["name"] for item in self.received[0]["tools"]}, expected)
         self.assertEqual(set(subagent.SUB_HANDLERS), expected)
         self.assertEqual(self.received[0]["system"], subagent.SUB_SYSTEM)
@@ -82,7 +82,7 @@ class SubagentTests(unittest.TestCase):
         ])
         self.assertEqual(result, "最终结论\n相关文件：details.txt")
         self.assertEqual(self.received[1]["messages"][-1], {"role": "user", "content": [{
-            "type": "tool_result", "tool_use_id": "read", "content": "大量中间细节",
+            "type": "tool_result", "tool_use_id": "read", "content": "1 | 大量中间细节",
         }]})
 
     def test_writes_and_reads_in_the_shared_workspace_with_lifecycle_hooks(self):
@@ -97,7 +97,7 @@ class SubagentTests(unittest.TestCase):
         ])
         self.assertEqual(result, "文件已创建并检查")
         self.assertEqual((self.workdir / "nested/demo.txt").read_text(encoding="utf-8"), "子任务写入的内容")
-        self.assertEqual(self.received[1]["messages"][-1]["content"][1]["content"], "子任务写入的内容")
+        self.assertEqual(self.received[1]["messages"][-1]["content"][1]["content"], "1 | 子任务写入的内容")
         self.assertEqual(events, [("pre", "write"), ("post", "write"), ("pre", "read"), ("post", "read"),
                                   ("stop", 4)])
 

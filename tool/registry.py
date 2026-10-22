@@ -6,6 +6,7 @@ from tool.edit_file import run_edit
 from tool.glob import run_glob
 from tool.load_skill import run_load_skill
 from tool.read_file import run_read
+from tool.search_files import run_search
 from tool.task import run_task
 from tool.task_system import (
     run_create_task, run_update_task, run_list_tasks,
@@ -30,11 +31,33 @@ BASE_TOOLS = [   #给模型看的，主智能体和子智能体共用的工具
     },
     {
         "name": "read_file",
-        "description": "读取文件内容，可通过 limit 参数只读取前 N 行。",
+        "description": "按行读取 UTF-8 文件，返回行号与原文。start_line/end_line 从 1 开始且包含结束行；也可用 limit 指定行数，但不能与 end_line 同用。默认 200 行，最多 1000 行及约 20000 字符，截断时返回后续起始行。行号不是源码，编辑时不要复制行号。",
         "input_schema": {
             "type": "object",
-            "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}},
+            "properties": {
+                "path": {"type": "string", "minLength": 1},
+                "start_line": {"type": "integer", "minimum": 1},
+                "end_line": {"type": "integer", "minimum": 1},
+                "limit": {"type": "integer", "minimum": 1},
+            },
             "required": ["path"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "search_files",
+        "description": "在目录或单个 UTF-8 文件中搜索单行字面文本，返回路径、行号和匹配片段。先搜索定位，再用 read_file 读取附近代码。默认区分大小写，默认跳过依赖、构建、Agent 数据目录和 .env 文件；不隐式跟随链接。只搜索不超过 1MB 的文件，结果有数量、长度和扫描上限；提示未完成或跳过时不能据此断言整个项目没有匹配。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "minLength": 1, "maxLength": 200, "description": "要搜索的原文，不是正则表达式。"},
+                "path": {"type": "string", "minLength": 1, "description": "默认当前工作目录，可指定子目录或单个文件。"},
+                "file_glob": {"type": "string", "minLength": 1, "description": "文件过滤，如 *.py 或 **/*.py，默认所有类型。"},
+                "max_results": {"type": "integer", "minimum": 1, "maximum": 200, "description": "最多返回多少个匹配行，默认 30。"},
+                "case_sensitive": {"type": "boolean", "description": "默认 true，false 表示忽略大小写。"},
+            },
+            "required": ["query"],
+            "additionalProperties": False,
         },
     },
     {
@@ -48,15 +71,17 @@ BASE_TOOLS = [   #给模型看的，主智能体和子智能体共用的工具
     },
     {
         "name": "edit_file",
-        "description": "精确匹配文件中的文本，仅替换第一次出现的位置。",
+        "description": "精确替换文件原文。old_text 必须非空且唯一匹配，多处匹配时请增加上下文后重试；仅确需全部替换时设置 replace_all=true。不要把 read_file 的展示行号或搜索结果前缀放入原文。保留原文件的 BOM 和 CRLF 换行。",
         "input_schema": {
             "type": "object",
             "properties": {
                 "path": {"type": "string"},
-                "old_text": {"type": "string"},
+                "old_text": {"type": "string", "minLength": 1},
                 "new_text": {"type": "string"},
+                "replace_all": {"type": "boolean", "description": "默认 false；true 表示明确要求替换全部非重叠匹配。"},
             },
             "required": ["path", "old_text", "new_text"],
+            "additionalProperties": False,
         },
     },
     {
@@ -87,6 +112,7 @@ BASE_TOOLS = [   #给模型看的，主智能体和子智能体共用的工具
 BASE_HANDLERS = {
     "bash": run_bash,
     "read_file": run_read,
+    "search_files": run_search,
     "write_file": run_write,
     "edit_file": run_edit,
     "glob": run_glob,

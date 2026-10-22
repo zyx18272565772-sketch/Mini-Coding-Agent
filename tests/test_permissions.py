@@ -39,6 +39,7 @@ class PermissionTests(unittest.TestCase):
     def test_normal_workspace_operations_are_allowed_without_prompting(self):
         calls = [
             tool_call("read_file", path="demo.txt"),
+            tool_call("search_files", query="demo"),
             tool_call("write_file", path="nested/demo.txt", content="hello"),
             tool_call("edit_file", path="demo.txt", old_text="old", new_text="new"),
             tool_call("glob", pattern="**/*.py"),
@@ -66,7 +67,7 @@ class PermissionTests(unittest.TestCase):
 
     def test_relative_and_absolute_outside_paths_require_approval_for_all_file_tools(self):
         for path in ("../outside.txt", str(self.root / "outside.txt")):
-            for name in ("read_file", "write_file", "edit_file"):
+            for name in ("read_file", "search_files", "write_file", "edit_file"):
                 with self.subTest(path=path, tool=name):
                     with patch("builtins.input", return_value="n") as prompt:
                         self.assertFalse(permission.check_permission(tool_call(name, path=path)))

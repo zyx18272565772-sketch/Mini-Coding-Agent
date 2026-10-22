@@ -67,7 +67,7 @@ class BackgroundLoopTests(unittest.TestCase):
                 return response([call(), {"type": "tool_use", "id": "read", "name": "read_file", "input": {"path": "readme.txt"}}])
             if len(requests) == 2:
                 self.assertFalse(finish.is_set())
-                self.assertEqual(requests[-1][-1]["content"][1]["content"], "独立文档")
+                self.assertEqual(requests[-1][-1]["content"][1]["content"], "1 | 独立文档")
                 self.assertIn("已启动", requests[-1][-1]["content"][0]["content"])
                 return response([{"type": "text", "text": "文档检查完成，等待测试结果。"}])
             self.assertEqual(len(requests), 3)

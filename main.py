@@ -17,6 +17,13 @@ def main() -> int:
 
     print("编程智能体 — 输入任务开始，输入 q / quit / exit 退出。\n")
     messages = []
+    from pathlib import Path
+    from storage.cli import cli_history
+    try:
+        history = cli_history(Path.cwd())
+    except (ValueError, RuntimeError) as error:
+        print(str(error), file=sys.stderr)
+        return 1
 
     while True:
         try:
@@ -33,12 +40,19 @@ def main() -> int:
         try:
             trigger_hooks("UserPromptSubmit", query)
             messages.append({"role": "user", "content": query})
-            agent_loop(messages, query)
+            if history is None:
+                agent_loop(messages, query)
+            else:
+                with history.run(messages, query) as run_id:
+                    agent_loop(messages, query, run_id=run_id)
         except KeyboardInterrupt:
             print("\n任务已中断。")
             return 130
         except AnthropicError as exc:
             print(f"\n模型请求失败：{exc}", file=sys.stderr)
+            return 1
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(f"\n执行失败：{exc}", file=sys.stderr)
             return 1
 
         for block in messages[-1]["content"]:

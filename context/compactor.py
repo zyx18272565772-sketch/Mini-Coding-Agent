@@ -63,6 +63,8 @@ class ContextCompactor:
         with path.open("x", encoding="utf-8") as transcript:
             for message in messages:
                 transcript.write(json.dumps(message, default=str, ensure_ascii=False) + "\n")
+        from storage.artifacts import record_artifact
+        record_artifact(path, "transcript")
         return path
 
     def persisted_output_path(self, output: str) -> str | None:
@@ -86,8 +88,13 @@ class ContextCompactor:
     def save_output(self, tool_use_id: str, output: str) -> Path:
         self.tool_results_dir.mkdir(parents=True, exist_ok=True)
         safe_id = re.sub(r"[^A-Za-z0-9._-]", "_", str(tool_use_id))[:120] or "unknown"
+        from storage.context import current_context
+        if current_context().get("run_id"):
+            safe_id += f"_{uuid.uuid4().hex}"
         path = self.tool_results_dir / f"{safe_id}.txt"
         path.write_text(output, encoding="utf-8")
+        from storage.artifacts import record_artifact
+        record_artifact(path, "tool_result")
         return path
 
     def persisted_preview(self, tool_use_id: str, output: str, preview_chars: int = 2000) -> str:

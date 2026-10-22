@@ -24,7 +24,11 @@ def main() -> int:
     if not args.dev and not index.is_file():
         print("前端尚未构建，请先在 frontend 目录执行 npm run build。", file=sys.stderr)
         return 1
-    service = DesktopService(ROOT, ROOT / ".agent_data" / "sessions")
+    try:
+        service = DesktopService(ROOT, ROOT / ".agent_data" / "sessions")
+    except (ValueError, RuntimeError) as error:
+        print(f"无法启动桌面存储：{error}", file=sys.stderr)
+        return 1
     window = webview.create_window(
         "Coding Agent", url="http://127.0.0.1:5173" if args.dev else str(index),
         js_api=service, width=1280, height=860, min_size=(640, 520),

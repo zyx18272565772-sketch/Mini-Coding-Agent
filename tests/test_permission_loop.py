@@ -89,8 +89,24 @@ class PermissionLoopTests(unittest.TestCase):
         self.assertEqual(prompt.call_count, 3)
         self.assertTrue(results[0]["content"].startswith("已写入"))
         self.assertTrue(results[1]["content"].startswith("已修改"))
-        self.assertEqual(results[2]["content"], "edited")
+        self.assertEqual(results[2]["content"], "1 | edited")
         self.assertEqual((self.root / "approved/nested/demo.txt").read_text(encoding="utf-8"), "edited")
+
+    def test_outside_search_uses_approval_before_reading_files(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "demo.py").write_text("outside_marker", encoding="utf-8")
+        handler = Mock(wraps=TOOL_HANDLERS["search_files"])
+        with patch.dict(agent.TOOL_HANDLERS, {"search_files": handler}), \
+                patch("builtins.input", side_effect=["n", "y"]) as prompt:
+            results = self.run_calls([
+                call("denied", "search_files", query="outside_marker", path="../outside"),
+                call("allowed", "search_files", query="outside_marker", path="../outside"),
+            ])
+        self.assertEqual(prompt.call_count, 2)
+        handler.assert_called_once_with(query="outside_marker", path="../outside")
+        self.assertEqual(results[0]["content"], "权限被拒绝。")
+        self.assertIn("demo.py:1: outside_marker", results[1]["content"])
 
     def test_hard_denied_call_does_not_prevent_later_allowed_call(self):
         run = Mock(return_value="safe output")

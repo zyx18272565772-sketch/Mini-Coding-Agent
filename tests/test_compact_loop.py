@@ -174,26 +174,27 @@ class CompactLoopTests(unittest.TestCase):
             parent.agent_loop(messages, "继续实现当前任务")
         self.assertEqual(len(requests), 2)
 
-    def test_oversized_new_file_result_is_persisted_before_next_request(self):
+    def test_oversized_new_tool_result_is_persisted_before_next_request(self):
         original = "文件详细内容" * 20000
-        (self.root / "large.txt").write_text(original, encoding="utf-8")
         requests = []
 
         def handle(body):
             requests.append(body)
             if len(requests) == 1:
-                return [tool("read_large", "read_file", path="large.txt")]
+                return [tool("large_output", "bash", command="fake-large-output")]
             self.assertEqual(len(requests), 2)
             result = body["messages"][-1]["content"][0]
-            self.assertEqual(result["tool_use_id"], "read_large")
+            self.assertEqual(result["tool_use_id"], "large_output")
             self.assertIn("<persisted-output>", result["content"])
             self.assertIn(original[:1000], result["content"])
             return [{"type": "text", "text": "已读取预览"}]
 
-        with patch.object(parent, "client", self.sdk_client(handle)):
+        # read_file 现在主动分页；模拟其它工具的大输出，继续验证压缩层的兜底。
+        with patch.object(parent, "client", self.sdk_client(handle)), \
+                patch.dict(parent.TOOL_HANDLERS, {"bash": lambda command: original}):
             messages = [{"role": "user", "content": "读取大文件"}]
             parent.agent_loop(messages, "读取大文件")
-        saved = self.root / ".task_outputs" / "tool-results" / "read_large.txt"
+        saved = self.root / ".task_outputs" / "tool-results" / "large_output.txt"
         self.assertEqual(saved.read_text(encoding="utf-8"), original)
         self.assertEqual(len(requests), 2)
 

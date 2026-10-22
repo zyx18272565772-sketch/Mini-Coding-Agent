@@ -6,11 +6,13 @@ from functools import wraps
 import multiprocessing
 from pathlib import Path
 import threading
+from uuid import uuid4
 
-from desktop_app.store import SessionStore, now
-from desktop_app.catalog import ProjectCatalog, validate_name
-from desktop_app.worker import run_worker, run_worker_entry, terminate_worker
-from task_system.store import TaskStore
+from desktop_app.store import now
+from desktop_app.catalog import validate_name
+from storage.config import storage_backend
+from desktop_app.worker import run_worker, run_worker_entry, send_packet, terminate_worker
+from storage.factory import desktop_stores, task_store as TaskStore
 from llm.usage import COUNTERS
 from llm.config import configured_model
 
@@ -37,9 +39,9 @@ class Job:
 class DesktopService:
     def __init__(self, default_workdir: Path, data_dir: Path, *, worker_target=run_worker):
         self._default_workdir = default_workdir.resolve()
-        self._store = SessionStore(data_dir)
-        first_launch = not (data_dir / "workspace.json").exists()
-        self._catalog = ProjectCatalog(data_dir / "workspace.json")
+        self._storage_backend = storage_backend()
+        self._store, self._catalog = desktop_stores(data_dir)
+        first_launch = not (self._catalog.path.exists() or (data_dir / "workspace.json").exists())
         self._sessions = {item["id"]: item for item in self._store.load_all()}
         self._jobs: dict[str, Job] = {}
         self._lock = threading.RLock()
@@ -48,6 +50,7 @@ class DesktopService:
         self._window = None
         if first_launch:
             self._catalog.for_directory(self._default_workdir)
+            self._catalog.save()
         for session in self._sessions.values():
             project = self._catalog.for_directory(Path(session["workdir"]))
             if session.get("project_id") != project["id"]:
@@ -75,6 +78,8 @@ class DesktopService:
 
     def _record(self, session, kind, *, persist=True, **data):
         event = {"seq": len(session["events"]) + 1, "type": kind, "time": now(), **data}
+        if session.get("run_id"):
+            event.setdefault("run_id", session["run_id"])
         session["events"].append(event)
         if persist:
             self._save(session)
@@ -85,7 +90,7 @@ class DesktopService:
             self._sessions.values(), key=lambda item: item["updated_at"], reverse=True)]
 
     def _view(self, session):
-        return deepcopy({**{key: value for key, value in session.items() if key not in ("messages", "todos", "version", "usage_runs")},
+        return deepcopy({**{key: value for key, value in session.items() if not key.startswith("_db_") and key not in ("messages", "todos", "version", "usage_runs")},
                          **self._task_view(session), **self._usage_view(session), "model": configured_model()})
 
     def _usage_view(self, session):
@@ -97,7 +102,7 @@ class DesktopService:
         session.setdefault("usage_runs", {})[usage["run_id"]] = deepcopy(usage)
         session["usage"] = deepcopy(usage)
 
-    def _settle_usage(self, session):
+    def _settle_usage(self, session, *, persist=True):
         usage = session.get("usage")
         if usage and usage["status"] == "running":
             usage = deepcopy(usage)
@@ -108,13 +113,13 @@ class DesktopService:
             usage["pending_calls"] = 0
             usage["status"] = session["status"]
             self._record_usage(session, usage)
-            self._record(session, "usage", usage=usage)
+            self._record(session, "usage", usage=usage, persist=persist)
 
     def _task_view(self, session):
         # 从项目文件读取，其他会话的任务变化也能显示；不复制到会话检查点。
         try:
             return {"tasks": TaskStore(Path(session["workdir"])).snapshot(), "task_error": ""}
-        except (ValueError, OSError) as error:
+        except (ValueError, OSError, RuntimeError) as error:
             return {"tasks": [], "task_error": f"无法读取项目任务：{error}"}
 
     @api_method
@@ -173,10 +178,14 @@ class DesktopService:
             children = [sid for sid, session in self._sessions.items() if session["project_id"] == project_id]
             if any(sid in self._jobs for sid in children):
                 raise ValueError("项目中仍有运行中的会话，请先停止任务再删除。")
+            if getattr(self._catalog, "deletes_sessions", False):
+                self._catalog.delete(project_id)
+            else:
+                for sid in children:
+                    self._store.delete(sid)
+                self._catalog.delete(project_id)
             for sid in children:
-                self._store.delete(sid)
                 del self._sessions[sid]
-            self._catalog.delete(project_id)
             return {"deleted_session_ids": children, "deleted_project_id": project_id}
 
     @api_method
@@ -210,7 +219,7 @@ class DesktopService:
             session.update(title=name, title_custom=True)
             try:
                 self._save(session)
-            except OSError:
+            except (OSError, RuntimeError):
                 session.clear()
                 session.update(previous)
                 raise
@@ -274,12 +283,21 @@ class DesktopService:
                 raise ValueError("这个会话仍在运行，请等待完成或先停止。")
             if not Path(session["workdir"]).is_dir():
                 raise ValueError("工作目录不存在，请重新选择文件夹。")
+            previous = dict(session)
             text = text.strip()
             if not session["messages"] and not session.get("title_custom"):
                 session["title"] = text.splitlines()[0][:36]
-            session["messages"].append({"role": "user", "content": text})
+            session["messages"] = [*session["messages"], {"role": "user", "content": text}]
+            session["events"] = list(session["events"])
             session["active_request"] = text
-            self._record(session, "user", text=text)
+            session.update(run_id=uuid4().hex, run_attempt=0, status="running", failure=None,
+                           usage=None, run_workdir=session["workdir"], model=configured_model())
+            try:
+                self._record(session, "user", text=text)
+            except (ValueError, OSError, RuntimeError):
+                session.clear()
+                session.update(previous)
+                raise
             return self._start(session)
 
     @api_method
@@ -301,17 +319,29 @@ class DesktopService:
         if not Path(session["workdir"]).is_dir():
             raise ValueError("工作目录不存在，请重新选择文件夹。")
         session_id = session["id"]
+        session["run_id"] = previous_usage["run_id"] if previous_usage else session.get("run_id") or uuid4().hex
+        session["run_attempt"] = session.get("run_attempt", 0) + 1
         session["status"] = "running"
         session["failure"] = None
         if previous_usage is None:
             session["usage"] = None
             session["run_workdir"] = session["workdir"]
-        self._record(session, "state", status="running")
+        try:
+            self._record(session, "state", status="running")
+        except (ValueError, OSError, RuntimeError) as error:
+            session["status"] = "error"
+            session["failure"] = {"kind": "storage", "message": f"无法保存任务进度：{error}", "retryable": False}
+            self._record(session, "state", status="error", persist=False)
+            raise
         parent, child = self._context.Pipe()
-        process = self._context.Process(target=run_worker_entry, args=(child, deepcopy({
+        payload = deepcopy({
             "messages": session["messages"], "session_id": session_id, "workdir": session["workdir"],
             "active_request": session["active_request"], "previous_usage": previous_usage,
-        }), self._worker_target), daemon=True)
+            "run_id": session["run_id"],
+            "storage_backend": self._storage_backend,
+        })
+        # spawn 参数保持很小；长历史在握手后由接收线程传输，避免阻塞发送接口。
+        process = self._context.Process(target=run_worker_entry, args=(child, None, self._worker_target), daemon=True)
         job = Job(process, parent)
         self._jobs[session_id] = job
         try:
@@ -325,22 +355,34 @@ class DesktopService:
             raise RuntimeError("后台进程启动失败，请重新打开桌面程序。")
         finally:
             child.close()
-        job.thread = threading.Thread(target=self._watch, args=(session_id, job), daemon=True)
+        job.thread = threading.Thread(target=self._watch, args=(session_id, job, payload), daemon=True)
         job.thread.start()
         return self._view(session)
 
-    def _watch(self, session_id, job):
+    def _watch(self, session_id, job, payload=None):
         final_status = "error"
         failure = {"kind": "worker", "message": "后台进程意外退出，本次任务已结束。", "retryable": False}
         try:
             while True:
-                event = job.pipe.recv()
-                with self._lock:
-                    if event.get("type") == "worker_ready":
-                        job.ready.set()
-                        if job.stopping:
+                try:
+                    event = job.pipe.recv()
+                except EOFError:
+                    break
+                except OSError as error:
+                    failure = {"kind": "communication", "message": f"工作进程通信失败：{error}", "retryable": False}
+                    break
+                if event.get("type") == "worker_ready":
+                    job.ready.set()
+                    if job.stopping:
+                        break
+                    if payload is not None:
+                        try:
+                            send_packet(job.pipe, payload)
+                        except (EOFError, OSError) as error:
+                            failure = {"kind": "communication", "message": f"无法传输任务上下文：{error}", "retryable": False}
                             break
-                        continue
+                    continue
+                with self._lock:
                     if job.stopping:
                         break
                     session = self._sessions[session_id]
@@ -363,24 +405,37 @@ class DesktopService:
                         self._record_usage(session, event["usage"])
                     # 片段先交给轮询，完整回复、检查点或结束状态再保存，避免逐字重写会话文件。
                     self._record(session, kind, persist=kind not in ("assistant_start", "assistant_delta"), **event)
-        except (EOFError, OSError):
-            pass
         except Exception as error:
             failure = {"kind": "storage", "message": f"无法保存任务进度：{error}", "retryable": False}
         finally:
             job.ready.set()
-            job.process.join(timeout=2)
-            with self._lock:
-                session = self._sessions[session_id]
-                session["pending_approval"] = None
-                session["status"] = "stopped" if job.stopping else final_status
-                self._settle_usage(session)
-                session["failure"] = failure if session["status"] == "error" else None
-                if session["status"] == "error":
-                    self._record(session, "error", message=failure["message"])
-                self._record(session, "state", status=session["status"])
-                self._jobs.pop(session_id, None)
-                job.pipe.close()
+            try:
+                if final_status == "error" and not job.stopping:
+                    terminate_worker(job.process)
+                else:
+                    job.process.join(timeout=2)
+            finally:
+                with self._lock:
+                    session = self._sessions[session_id]
+                    session["pending_approval"] = None
+                    session["status"] = "stopped" if job.stopping else final_status
+                    session["failure"] = failure if session["status"] == "error" else None
+                    try:
+                        self._settle_usage(session, persist=False)
+                        if session["status"] == "error":
+                            self._record(session, "error", message=failure["message"], persist=False)
+                        self._record(session, "state", status=session["status"], persist=False)
+                        self._save(session)
+                    except Exception as error:
+                        # 磁盘仍不可写时，至少保留可轮询的错误状态并释放任务。
+                        failure = {"kind": "storage", "message": f"无法保存任务进度：{error}", "retryable": False}
+                        session["status"] = "stopped" if job.stopping else "error"
+                        session["failure"] = failure if session["status"] == "error" else None
+                        self._record(session, "error", message=failure["message"], persist=False)
+                        self._record(session, "state", status=session["status"], persist=False)
+                    finally:
+                        self._jobs.pop(session_id, None)
+                        job.pipe.close()
 
     @api_method
     def poll(self, session_id, after=0):
@@ -406,7 +461,7 @@ class DesktopService:
                 raise ValueError("这条权限请求已经结束，不能再次操作。")
             if not isinstance(allow, bool):
                 raise ValueError("权限决定必须是允许或拒绝。")
-            job.pipe.send({"request_id": request_id, "allow": allow})
+            send_packet(job.pipe, {"request_id": request_id, "allow": allow})
             session["pending_approval"] = None
             session["status"] = "running"
             self._record(session, "permission_resolved", request_id=request_id, allow=allow)

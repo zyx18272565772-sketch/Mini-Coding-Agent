@@ -6,6 +6,10 @@
 
 ## 已实现的功能
 
+可选接入 GitHub MCP：通过官方远程只读服务查询仓库、Issue 和 PR，主、子 Agent 各自最多增加 7 个查询工具，继续使用现有权限、钩子和折叠执行记录。默认关闭，安装及令牌配置见 [GitHub MCP](docs/github_mcp.md)。
+
+支持 MySQL 保存项目、会话原文、模型检查点、运行事件、用量、任务依赖和长期记忆，桌面与命令行共用。默认仍为文件模式；配置、初始化及旧文件导入见 [MySQL 存储](docs/mysql.md)。
+
 | 模块 | 当前能力 |
 | --- | --- |
 | Agent Loop | 模型请求 → 工具执行 → 结果回传 → 再次请求模型，直到本轮结束 |
@@ -19,6 +23,7 @@
 | 项目任务 | 持久化任务、依赖检查、领取和完成，已替换 `todo_write` |
 | 桌面交互 | 项目与多会话、流式回复、折叠执行记录、权限确认、停止与失败后继续 |
 | 用量统计 | 请求次数、输入输出和缓存 Token，按主 Agent、子 Agent、记忆、压缩分类 |
+| GitHub MCP | 可选的远程只读查询、动态工具发现、参数校验、超时与错误状态 |
 
 任务拆分、工具选择和失败后的修复方案由模型决定，程序负责执行工具及检查参数、权限和任务状态。工具链支持“修改代码 → 运行测试 → 读取失败信息 → 继续修改”，实际任务效果取决于模型、提示词和项目环境。
 
@@ -69,7 +74,7 @@ Set-Location ..
 
 只使用命令行时，安装 `requirements.txt`，配置 `.env` 后运行 `main.py`，不需要桌面依赖和前端构建。它与桌面版共用 Agent Loop、工具、记忆和任务，但回复以整段文字输出。
 
-输入 `q`、`quit`、`exit` 或在等待输入时按 Ctrl+C 退出；任务执行期间 Ctrl+C 会中断本轮并退出。工作目录是启动时的当前目录。聊天消息只保存在当前进程内存中，退出后不会恢复；项目记忆、任务和压缩归档仍保存在磁盘。
+输入 `q`、`quit`、`exit` 或在等待输入时按 Ctrl+C 退出；任务执行期间 Ctrl+C 会中断本轮并退出。工作目录是启动时的当前目录。文件模式的命令行聊天只保存在进程内存；MySQL 模式会保存会话及运行记录，可在桌面查看。命令行每次启动创建新会话，尚未提供选择旧会话继续的参数。
 
 ## 桌面使用
 
@@ -165,7 +170,9 @@ Set-Location ..
 
 长期记忆与聊天记录分开。主 Agent 在每次用户请求开始时选择相关记忆，本轮结束时提取稳定信息，达到条件时整理；子 Agent 不独立写入长期记忆。记忆由模型提出、规则过滤，不保证完整准确。详见 [记忆模块](docs/memory.md)。
 
-| 数据 | 保存位置 | 范围 |
+下表是 `STORAGE_BACKEND=file` 时的位置。设为 `mysql` 后，项目、会话、运行、事件、用量、任务和记忆写入数据库中的 11 张业务表；外观设置使用本机 `appearance.json`，压缩归档和大型工具输出仍在本地，由 `artifacts` 表登记元数据。旧文件需显式导入，不会自动覆盖或删除。
+
+| 数据 | 文件模式保存位置 | 范围 |
 | --- | --- | --- |
 | 桌面会话、模型检查点、用量 | Agent 根目录 `.agent_data/sessions/<会话ID>.json` | 各会话独立 |
 | 项目列表、主题与字号 | Agent 根目录 `.agent_data/sessions/workspace.json` | 桌面配置 |
@@ -214,6 +221,7 @@ llm/
     generation.py          # 统一请求、流式接收和完整性检查
     errors.py              # 请求失败分类
     usage.py               # 按任务与请求用途统计用量
+mcp_client/                # 可选 GitHub MCP 配置、HTTP 会话和同步适配
 context/compactor.py       # 上下文裁剪、转存和摘要
 memory/                    # 长期记忆存储与模型处理
 task_system/store.py       # 持久化任务、依赖、领取者和文件锁
@@ -222,10 +230,12 @@ skill/loader.py            # 技能扫描、目录与全文缓存
 skills/code-review/        # 中文代码审查技能
 desktop_app/               # 项目/会话存储、窗口接口、工作进程
 frontend/                  # React + Vite 源码与前端测试
+storage/                   # MySQL 仓储、事务、表结构、迁移与存储选择
 docs/                      # 专题设计和行为约定
 tests/                     # Python 测试与浏览器/WebView2 验收
 requirements.txt           # 核心依赖
 requirements-desktop.txt   # 桌面依赖，包含核心依赖
+requirements-mcp.txt       # 可选的官方 MCP SDK，包含核心依赖
 .env.example               # 模型配置模板
 ```
 
@@ -235,6 +245,8 @@ requirements-desktop.txt   # 桌面依赖，包含核心依赖
 
 Python 使用标准库 `unittest`，前端使用 Node.js 测试运行器。核心测试使用临时目录、模拟模型或 SDK 模拟网络，不消耗真实模型 API 用量；部分测试会启动本地命令和工作进程。
 
+运行包含 MCP 的完整测试集前，需要安装 `requirements-mcp.txt`。测试 MCP 使用模拟会话和内存 HTTP 传输，不需要真实 GitHub 令牌；完整回归时将 `GITHUB_MCP_ENABLED` 设为 `false`，防止其它测试启动真实连接。
+
 ```powershell
 .\.venv\Scripts\python.exe -B -m unittest discover -s tests -p "test_*.py"
 Set-Location frontend
@@ -242,9 +254,11 @@ npm test
 npm run build
 ```
 
-最近一次文件工具优化后的验证：**262 项 Python 测试中 261 项通过，1 项因 Windows 符号链接权限跳过；19 项前端测试通过，生产构建成功。** 覆盖主/子循环消息往返、文件工具、权限钩子、任务依赖、压缩、记忆、后台命令、流式输出、会话恢复和用量统计。
+测试覆盖主/子循环消息往返、文件工具、权限钩子、任务依赖、压缩、记忆、后台命令、流式输出、会话恢复、用量统计、MCP 协议适配、管道中断和长会话后台传输。MySQL 集成测试另行验证真实建表、事务回滚、并发领取、检查点恢复、重启后继续、CLI 保存及旧文件重复导入；未配置独立测试库时跳过。长会话输入与发送的测量记录见 [桌面性能说明](docs/desktop-performance.md)。
 
 浏览器验收使用 Playwright、`tests/desktop_browser_server.py` 和对应的 `tests/desktop_*_ui.cjs`；`PLAYWRIGHT_MODULE` 可指定已有 Playwright 安装位置。文件工具卡片由 `tests/desktop_file_tools_ui.cjs` 验证中文名称、关键词、默认折叠和结果展开；`tests/desktop_native_smoke.py` 用于真实 Windows WebView2 验证，需要相应本机运行环境。
+
+`tests/desktop_mcp_ui.cjs` 使用模拟事件验证真实浏览器中的 GitHub MCP 卡片、仓库预览、子 Agent 标识和远程失败显示，不连接真实 GitHub 账号。
 
 这些测试验证程序机制，不等于真实模型在任意代码仓库上的任务成功率。当前没有代码覆盖率百分比或真实任务基准成绩。
 
@@ -252,9 +266,9 @@ npm run build
 
 - 当前定位为本地桌面编程 Agent 原型，尚未提供完整 OS 沙箱、容器隔离或工作树隔离。
 - `edit_file` 已有匹配校验，仍整份读写，尚无版本冲突检查、原子替换和自动撤销；`write_file` 默认覆盖已有内容。
-- Git 操作可以通过 Shell 执行，尚无专用 Git 工具；未集成 MCP、Agent Teams、workflow 或 goal 等后续模块。
+- Git 操作可以通过 Shell 执行，尚无专用 Git 工具；GitHub MCP 首版只读，未集成 Agent Teams、workflow 或 goal 等后续模块。
 - 任务状态由模型更新；命令失败可反馈模型继续处理，但没有确定性的测试验收门，也没有所有错误通用的自动重试流程。
-- 会话、任务和记忆使用本地文件，尚未使用 MySQL 或 Redis；关闭程序不会恢复仍在执行的命令。
+- 支持文件或 MySQL 存储，尚未接入 Redis；关闭程序不会恢复仍在执行的命令。数据库模式仍依赖本地源码、技能和归档文件，不是多设备同步系统。
 
 Agent Loop、工具映射、权限/钩子、子上下文、技能加载、上下文压缩、文件记忆、依赖任务和后台通知等核心思路参考 learn-claude-code 的相关章节。教程各章是机制示例，本项目在同一主循环中组合实现，`todo_write` 已由任务系统替换。
 

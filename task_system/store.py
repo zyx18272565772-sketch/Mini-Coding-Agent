@@ -1,7 +1,4 @@
-"""参考 s10 的任务状态机；使用文件锁和原子替换支持桌面多会话。"""
-
 from __future__ import annotations
-
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 import json

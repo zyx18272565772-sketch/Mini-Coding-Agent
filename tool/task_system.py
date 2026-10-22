@@ -3,7 +3,7 @@
 from dataclasses import asdict
 import json
 
-from task_system.store import TaskStore
+from storage.factory import task_store as TaskStore
 from tool import workspace
 
 

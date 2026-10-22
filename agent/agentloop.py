@@ -10,20 +10,21 @@ from llm.errors import describe_failure
 from llm.generation import create_message
 from llm.usage import run_usage
 from memory.manager import MemoryManager
-from memory.store import FileMemoryStore
+from storage.factory import memory_store
+from mcp_client.runtime import github_mcp_scope, extend_tools
 from tool import workspace
 from tool.compact import COMPACT_REQUESTED
 from tool.executor import execute_tool
 from tool.registry import TOOLS, TOOL_HANDLERS
 
 
-def agent_loop(messages: list, active_request: str, *, previous_usage=None):
+def agent_loop(messages: list, active_request: str, *, previous_usage=None, run_id=None):
     run = None
     background = None
     try:
-        with run_usage(previous=previous_usage, report=usage_reporter()) as run:
-            with BackgroundManager(workspace.WORKDIR) as background:
-                _agent_loop(messages, active_request, background)
+        with run_usage(previous=previous_usage, report=usage_reporter(), run_id=run_id) as run:
+            with github_mcp_scope() as mcp, BackgroundManager(workspace.WORKDIR) as background:
+                _agent_loop(messages, active_request, background, mcp)
     except Exception as error:
         if describe_failure(error)["retryable"]:
             # 后台管理器已经清理命令；保存取消/完成通知，恢复时不会误以为仍在运行。
@@ -39,12 +40,13 @@ def agent_loop(messages: list, active_request: str, *, previous_usage=None):
                   f"输出 {usage['output_tokens']:,}，总计 {usage['total_tokens']:,} Token{unknown}")
 
 
-def _agent_loop(messages: list, active_request: str, background: BackgroundManager):
+def _agent_loop(messages: list, active_request: str, background: BackgroundManager, mcp=None):
+    tools, handlers = extend_tools(TOOLS, TOOL_HANDLERS, mcp)
     memory = MemoryManager(
-        FileMemoryStore(workspace.WORKDIR), client, MODEL,
+        memory_store(workspace.WORKDIR), client, MODEL,
         report=lambda text: emit("notice", text=text),
     )
-    # 每次用户请求只召回一次，工具循环复用这份系统提示词。
+    #每次用户请求只召回一次，工具循环复用这份系统提示词。
     system = SYSTEM + memory.load_memories(messages, active_request)
     compactor = ContextCompactor(
         client, MODEL, workspace.WORKDIR / ".transcripts",
@@ -59,7 +61,7 @@ def _agent_loop(messages: list, active_request: str, background: BackgroundManag
             response = create_message(
                 client, on_event=emit if streaming_enabled() else None,
                 model=MODEL, system=system, messages=messages,
-                tools=TOOLS, max_tokens=8000,
+                tools=tools, max_tokens=8000,
             )
             reactive_retries = 0
         except Exception as error:
@@ -94,14 +96,17 @@ def _agent_loop(messages: list, active_request: str, background: BackgroundManag
         results = []
         compact_requested = False
         for block in tool_calls:
-            output, allowed = execute_tool(block, TOOL_HANDLERS, background=background)
+            output, allowed = execute_tool(block, handlers, background=background)
             if allowed and block.name == "compact" and output == COMPACT_REQUESTED:
                 compact_requested = True
-            results.append({
+            result = {
                 "type": "tool_result",
                 "tool_use_id": block.id,
                 "content": str(output),
-            })
+            }
+            if getattr(output, "is_error", False) or (block.name.startswith("mcp__") and not allowed):
+                result["is_error"] = True
+            results.append(result)
 
         # 回传工具结果，再次调用模型。
         messages.append({"role": "user", "content": results})

@@ -24,6 +24,6 @@ function CodeBlock({ children }) {
   return <div className="code-block"><div className="code-header"><span>{language}</span><CopyButton text={() => content.current?.textContent || ''} label="复制代码" /></div><pre ref={content}>{children}</pre></div>;
 }
 
-export default function MessageContent({ text }) {
+export default React.memo(function MessageContent({ text }) {
   return <div className="markdown"><Markdown skipHtml remarkPlugins={[remarkGfm]} rehypePlugins={[[rehypeHighlight, { detect: false }]]} components={{ a: SafeLink, pre: CodeBlock, table: ({ children }) => <div className="markdown-table"><table>{children}</table></div> }}>{text}</Markdown></div>;
-}
+});

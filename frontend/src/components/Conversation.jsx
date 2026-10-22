@@ -13,7 +13,7 @@ const suggestions = [
   [FlaskConical, '运行项目测试', '请查找这个项目使用的测试框架，运行现有测试并报告结果；如果没有测试，请先说明。'],
 ];
 
-export default function Conversation({ session, projectName, loading, onSuggestion, onQuote }) {
+export default function Conversation({ session, projectName, loading, pendingMessage, onSuggestion, onQuote }) {
   const rows = useMemo(() => buildTimeline(session?.events || []), [session?.events]);
   const visibleRows = useMemo(() => groupExecutionRows(rows), [rows]);
   const waitingBackground = rows.some(row => row.status === 'background') && rows.at(-1)?.type === 'notice' && rows.at(-1).text?.includes('等待后台');
@@ -27,7 +27,7 @@ export default function Conversation({ session, projectName, loading, onSuggesti
       follow.current = true;
     }
     if (follow.current && scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight;
-  }, [rows, session?.id, session?.pending_approval]);
+  }, [rows, session?.id, session?.pending_approval, pendingMessage]);
 
   function onScroll() {
     const element = scroller.current;
@@ -37,7 +37,7 @@ export default function Conversation({ session, projectName, loading, onSuggesti
 
   return <div className="conversation-shell">
     <div className="conversation-scroll" ref={scroller} onScroll={onScroll} role="log" aria-live="polite" aria-relevant="additions" aria-label="聊天记录" tabIndex={0}>
-      {loading ? <div className="loading-state" role="status"><LoaderCircle size={20} className="spin" />正在载入会话…</div> : !rows.length ? <section className="welcome">
+      {loading ? <div className="loading-state" role="status"><LoaderCircle size={20} className="spin" />正在载入会话…</div> : !rows.length && !pendingMessage ? <section className="welcome">
         <div className="welcome-project"><span className="project-mark"><Code2 size={20} /></span>{projectName || folderName(session?.workdir) || '你的工作区'}</div>
         <h1>今天想完成什么？</h1>
         <p>从一个想法开始，一起阅读、编写和改进代码。</p>
@@ -48,8 +48,9 @@ export default function Conversation({ session, projectName, loading, onSuggesti
           {row.interrupted && <div className="stream-interrupted">输出已中断</div>}
           {!row.streaming && row.text && <div className="message-actions"><CopyButton text={row.text} /></div>}
         </article> : row.type === 'error' ? <div className="inline-error" role="alert" key={row.seq}><AlertCircle size={16} /><span>{row.message}</span></div> : <div className="timeline-notice" key={row.seq}><SquareNotice />{row.text}</div>)}
+        {pendingMessage && <UserMessage text={pendingMessage.text} pending />}
         {session?.status === 'running' && <div className="thinking" role="status"><span className="thinking-dot" />{waitingBackground ? '正在等待后台任务完成…' : 'Agent 正在处理任务…'}</div>}
-        {session?.status === 'completed' && <div className="completion-note"><Check size={13} />本轮任务已结束</div>}
+        {session?.status === 'completed' && !pendingMessage && <div className="completion-note"><Check size={13} />本轮任务已结束</div>}
       </div>}
     </div>
     <ChatSelection container={scroller} sessionId={session?.id} onReply={onQuote} />
@@ -59,7 +60,7 @@ export default function Conversation({ session, projectName, loading, onSuggesti
 
 function SquareNotice() { return <span className="stop-notice-icon" />; }
 
-function UserMessage({ text }) {
+function UserMessage({ text, pending = false }) {
   const message = splitRequest(text);
-  return <div className="user-message"><div>{message.quote && <blockquote className="user-quote">{message.quote}</blockquote>}<AttachmentList items={message.attachments} /><div>{message.text}</div></div></div>;
+  return <div className="user-message" data-pending={pending || undefined}><div>{message.quote && <blockquote className="user-quote">{message.quote}</blockquote>}<AttachmentList items={message.attachments} /><div>{message.text}</div>{pending && <small role="status">正在发送…</small>}</div></div>;
 }

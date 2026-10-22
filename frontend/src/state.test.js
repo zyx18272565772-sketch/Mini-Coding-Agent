@@ -2,6 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mergeEvents, buildTimeline, mergeSnapshot, taskStatus, groupExecutionRows } from './state.js';
 
+test('空轮询保持历史事件引用，状态与共享任务仍可以更新', () => {
+  const events = [{ seq: 1, type: 'user', text: '历史消息' }];
+  const merged = mergeSnapshot({ events, status: 'running' }, { cursor: 1, events: [], status: 'completed', tasks: [{ id: 'new-task' }] });
+  assert.equal(merged.events, events);
+  assert.equal(merged.status, 'completed');
+  assert.equal(merged.tasks[0].id, 'new-task');
+});
+
 test('每轮工具与子智能体过程合并，正文和新任务保留各自位置', () => {
   const rows = [
     { seq: 1, type: 'user', text: '任务一' },
@@ -148,6 +156,14 @@ test('后台启动确认保持运行，完成事件只更新原工具卡片并�
   assert.equal(rows[0].status, 'completed');
   assert.equal(rows[0].output, '测试通过');
   assert.equal(rows[0].task_id, 'bg_123');
+});
+
+test('MCP 通过权限但返回错误时显示执行失败，旧工具记录保持兼容', () => {
+  const start = { seq: 1, type: 'tool_start', call_id: 'github', name: 'mcp__github__list_issues' };
+  const result = { seq: 2, type: 'tool_result', call_id: 'github', allowed: true, output: '远程失败', is_error: true };
+  assert.equal(buildTimeline([start, result])[0].status, 'failed');
+  assert.equal(buildTimeline([start, { ...result, allowed: false }])[0].status, 'denied');
+  assert.equal(buildTimeline([start, { ...result, is_error: undefined }])[0].status, 'completed');
 });
 
 test('后台失败不显示成功，停止时关闭主子智能体的后台运行状态', () => {

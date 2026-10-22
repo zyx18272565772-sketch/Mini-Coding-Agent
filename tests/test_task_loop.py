@@ -76,7 +76,7 @@ class TaskLoopTests(unittest.TestCase):
                 self.assertIn("验证接口", results[0]["content"])
                 return [call("verify", "read_file", path="api.txt"), call("done_b", "complete_task", task_id=ids[1])]
             self.assertEqual(step, 6)
-            self.assertEqual(results[0]["content"], "接口实现")
+            self.assertEqual(results[0]["content"], "1 | 接口实现")
             return [{"type": "text", "text": "实现和验证均已完成"}]
 
         messages = self.run_agent(respond)
