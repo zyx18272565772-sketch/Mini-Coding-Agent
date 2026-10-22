@@ -170,12 +170,14 @@ class CompactLoopTests(unittest.TestCase):
             return [{"type": "text", "text": "完成"}]
 
         with patch.object(parent, "client", self.sdk_client(handle)):
-            messages = [{"role": "user", "content": "旧资料" * 20000}]
+            messages = [{"role": "user", "content": "旧资料" * 180000},
+                        {"role": "assistant", "content": "已阅读"},
+                        {"role": "user", "content": "继续实现当前任务"}]
             parent.agent_loop(messages, "继续实现当前任务")
         self.assertEqual(len(requests), 2)
 
     def test_oversized_new_tool_result_is_persisted_before_next_request(self):
-        original = "文件详细内容" * 20000
+        original = "文件详细内容" * 70000
         requests = []
 
         def handle(body):
@@ -186,7 +188,8 @@ class CompactLoopTests(unittest.TestCase):
             result = body["messages"][-1]["content"][0]
             self.assertEqual(result["tool_use_id"], "large_output")
             self.assertIn("<persisted-output>", result["content"])
-            self.assertIn(original[:1000], result["content"])
+            self.assertIn(original[:2000], result["content"])
+            self.assertNotIn(original[:2001], result["content"])
             return [{"type": "text", "text": "已读取预览"}]
 
         # read_file 现在主动分页；模拟其它工具的大输出，继续验证压缩层的兜底。
@@ -197,6 +200,60 @@ class CompactLoopTests(unittest.TestCase):
         saved = self.root / ".task_outputs" / "tool-results" / "large_output.txt"
         self.assertEqual(saved.read_text(encoding="utf-8"), original)
         self.assertEqual(len(requests), 2)
+
+    def test_both_loops_deliver_more_than_fifty_small_messages_in_full(self):
+        for module, handlers in ((parent, parent.TOOL_HANDLERS), (subagent, subagent.SUB_HANDLERS)):
+            with self.subTest(module=module.__name__):
+                requests = []
+
+                def handle(body):
+                    requests.append(body)
+                    step = len(requests)
+                    self.assertIn("tools", body)
+                    self.assertEqual(len(body["messages"]), 1 + 2 * (step - 1))
+                    if step > 1:
+                        self.assertEqual(body["messages"][2]["content"][0]["content"], "文件列表 *.1")
+                    if step <= 27:
+                        return [tool(f"list_{step}", "glob", pattern=f"*.{step}")]
+                    return [{"type": "text", "text": "完成"}]
+
+                with patch.object(module, "client", self.sdk_client(handle)), \
+                        patch.dict(handlers, {"glob": lambda pattern: "文件列表 " + pattern}):
+                    if module is parent:
+                        module.agent_loop([dict(role="user", content="分批探索")], "分批探索")
+                    else:
+                        self.assertEqual(module.run_subagent("分批探索"), "完成")
+                self.assertEqual(len(requests), 28)
+                self.assertFalse((self.root / ".transcripts").exists())
+
+    def test_both_loops_microcompact_before_request_without_a_summary_call(self):
+        for module, handlers in ((parent, parent.TOOL_HANDLERS), (subagent, subagent.SUB_HANDLERS)):
+            with self.subTest(module=module.__name__):
+                requests = []
+
+                def handle(body):
+                    requests.append(body)
+                    self.assertIn("tools", body)
+                    if len(requests) == 1:
+                        return [tool(f"batch_{n}", "bash", command=f"fake-{n}") for n in range(10)]
+                    self.assertEqual(len(requests), 2)
+                    results = body["messages"][-1]["content"]
+                    for n, result in enumerate(results):
+                        if n < 7:
+                            self.assertIn("<persisted-output>", result["content"])
+                            self.assertIn(str(n) * 400, result["content"])
+                            self.assertNotIn(str(n) * 401, result["content"])
+                        else:
+                            self.assertEqual(result["content"], str(n) * 50000)
+                    return [{"type": "text", "text": "完成"}]
+
+                with patch.object(module, "client", self.sdk_client(handle)), \
+                        patch.dict(handlers, {"bash": lambda command: command[-1] * 50000}):
+                    if module is parent:
+                        module.agent_loop([dict(role="user", content="分批探索")], "分批探索")
+                    else:
+                        self.assertEqual(module.run_subagent("分批探索"), "完成")
+                self.assertEqual(len(requests), 2)
 
     def test_context_error_retries_once_without_repeating_completed_write(self):
         client = Mock()

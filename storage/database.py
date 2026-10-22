@@ -62,7 +62,7 @@ class Database:
         from alembic.migration import MigrationContext
         with self.transaction() as connection:
             version = MigrationContext.configure(connection).get_current_revision()
-            if version != "0001_mysql_storage":
+            if version != "0002_artifact_content":
                 raise StorageError("MySQL 数据库尚未初始化或版本不匹配，请先运行 python -m storage.manage upgrade")
 
 

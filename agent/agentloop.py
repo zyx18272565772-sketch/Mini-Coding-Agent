@@ -51,6 +51,7 @@ def _agent_loop(messages: list, active_request: str, background: BackgroundManag
     compactor = ContextCompactor(
         client, MODEL, workspace.WORKDIR / ".transcripts",
         workspace.WORKDIR / ".task_outputs" / "tool-results",
+        tools=tools,
     )
     reactive_retries = 0
     while True:
@@ -73,7 +74,7 @@ def _agent_loop(messages: list, active_request: str, background: BackgroundManag
                 continue
             raise
 
-        # 保存模型回复，包括它请求执行的工具调用。
+        #保存模型回复，包括它请求执行的工具调用。
         messages.append({"role": "assistant", "content": response.content})
         text = "\n".join(block.text for block in response.content if block.type == "text")
         if text and not streaming_enabled():
@@ -97,14 +98,17 @@ def _agent_loop(messages: list, active_request: str, background: BackgroundManag
         compact_requested = False
         for block in tool_calls:
             output, allowed = execute_tool(block, handlers, background=background)
+            # 加载工具或子任务可能刚刚连接 MCP，后续工具与下一轮请求使用新定义。
+            tools, handlers = extend_tools(TOOLS, TOOL_HANDLERS, mcp)
+            compactor.tools = tools
             if allowed and block.name == "compact" and output == COMPACT_REQUESTED:
                 compact_requested = True
             result = {
                 "type": "tool_result",
                 "tool_use_id": block.id,
-                "content": str(output),
+                "content": compactor.persist_large_output(block.id, str(output)),
             }
-            if getattr(output, "is_error", False) or (block.name.startswith("mcp__") and not allowed):
+            if getattr(output, "is_error", False) or (not allowed and (block.name == "read_file" or block.name.startswith("mcp__"))):
                 result["is_error"] = True
             results.append(result)
 

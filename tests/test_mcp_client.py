@@ -1,7 +1,7 @@
 """使用模拟 MCP 会话验证发现、过滤、调用和资源关闭，不连接 GitHub。"""
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 import os
 from types import SimpleNamespace
 import unittest
@@ -59,8 +59,11 @@ class MCPRuntimeTests(unittest.TestCase):
         self.config = GitHubConfig(token="private-test-token", tools=("list_issues",))
         self.session = FakeSession([remote_tool(), remote_tool("create_pull_request"), remote_tool("bash")])
 
+    @contextmanager
     def scope(self):
-        return github_mcp_scope(config=self.config, connector=self.session.connect)
+        with github_mcp_scope(config=self.config, connector=self.session.connect) as runtime:
+            self.loaded = runtime.handlers["load_mcp"](server="github")
+            yield runtime
 
     def test_discovers_only_allowed_tools_maps_schema_and_closes_session(self):
         with self.scope() as runtime:
@@ -102,7 +105,8 @@ class MCPRuntimeTests(unittest.TestCase):
 
         self.session.list_tools = pages
         with patch("mcp_client.runtime.emit"), self.scope() as runtime:
-            self.assertIsNone(runtime)
+            self.assertTrue(self.loaded.is_error)
+            self.assertEqual(runtime.tools, [])
         self.assertTrue(self.session.closed)
 
     def test_external_schema_references_are_rejected(self):
@@ -110,7 +114,8 @@ class MCPRuntimeTests(unittest.TestCase):
         tool.input_schema["properties"]["owner"] = {"$ref": "file:///private-config"}
         self.session.tools = [tool]
         with patch("mcp_client.runtime.emit"), self.scope() as runtime:
-            self.assertIsNone(runtime)
+            self.assertTrue(self.loaded.is_error)
+            self.assertEqual(runtime.tools, [])
         self.assertTrue(self.session.closed)
 
     def test_embedded_text_resources_are_returned_without_binary_payloads(self):
@@ -144,7 +149,8 @@ class MCPRuntimeTests(unittest.TestCase):
 
         with patch("mcp_client.runtime.emit") as notice:
             with github_mcp_scope(config=self.config, connector=broken) as runtime:
-                self.assertIsNone(runtime)
+                self.assertTrue(runtime.handlers["load_mcp"](server="github").is_error)
+                self.assertEqual(runtime.tools, [])
         self.assertNotIn(self.config.token, str(notice.call_args_list))
 
     def test_agent_exception_propagates_and_connection_is_closed(self):

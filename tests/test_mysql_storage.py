@@ -355,6 +355,179 @@ class MySQLStorageTests(unittest.TestCase):
         paths = [Path(p["workdir"]) for p in service.bootstrap()["data"]["projects"]]
         self.assertNotIn(default, paths)
 
+    def test_archives_store_body_in_mysql_without_creating_directories(self):
+        from tool import workspace
+        self.enterContext(patch.object(workspace, "WORKDIR", self.workdir))
+        from anthropic.types import ToolUseBlock
+        from context.compactor import ContextCompactor
+        from storage.context import storage_scope
+        from storage.models import artifacts
+        from sqlalchemy import select
+        compactor = ContextCompactor(None, "mock", self.workdir / ".transcripts", self.workdir / ".task_outputs/tool-results")
+        messages = [dict(role="assistant", content=[ToolUseBlock(type="tool_use", id="call_1", name="read_file", input={"path": "main.py"})])]
+        with storage_scope(session_id=self.session["id"]):
+            transcript = compactor.write_transcript(messages)
+            output = compactor.save_output("call_1", "第一行\n第二行\n第三行\n")
+        self.assertTrue(str(transcript).startswith("artifact://"))
+        self.assertTrue(str(output).startswith("artifact://"))
+        self.assertFalse((self.workdir / ".transcripts").exists())
+        self.assertFalse((self.workdir / ".task_outputs").exists())
+        with self.db.transaction() as c:
+            rows = c.execute(select(artifacts).where(artifacts.c.session_id == self.session["id"])).mappings().all()
+        self.assertEqual(len(rows), 2)
+        archive = next(r for r in rows if r["kind"] == "transcript")
+        self.assertEqual(json.loads(archive["content"])["content"][0]["input"], {"path": "main.py"})
+        self.assertIsNone(archive["path"])
+        from tool import workspace
+        from tool.read_file import run_read
+        from agent.permission import check_permission
+        from types import SimpleNamespace
+        with patch.object(workspace, "WORKDIR", self.workdir), patch("builtins.input") as ask:
+            self.assertTrue(check_permission(SimpleNamespace(name="read_file", input={"path": str(output)})))
+            ask.assert_not_called()
+            self.assertEqual(run_read(str(output), start_line=2, end_line=3), "2 | 第二行\n3 | 第三行")
+            self.assertEqual(run_read(str(output), start_line=4), "（起始行超过文件末尾）")
+
+    def test_database_archive_compaction_reuses_references(self):
+        from context.compactor import ContextCompactor
+        from storage.models import artifacts
+        from sqlalchemy import select, func
+        from tool import workspace
+        self.enterContext(patch.object(workspace, "WORKDIR", self.workdir))
+        from tool.read_file import run_read
+        compactor = ContextCompactor(None, "mock", self.workdir / ".transcripts", self.workdir / ".task_outputs/tool-results")
+        original = "检索结果\n" * 10000
+        preview = compactor.persisted_preview("read_1", original)
+        reference = compactor.persisted_output_path(preview)
+        self.assertTrue(reference.startswith("artifact://"))
+        self.assertEqual(compactor.persisted_output_path(compactor.persisted_preview("read_2", preview)), reference)
+        history = [dict(role="user", content=f"旧消息 {n}") for n in range(70)]
+        with patch.object(compactor, "summarize_history", return_value="旧工作已整理"):
+            trimmed = compactor.compact_history(history, "继续工作")
+        self.assertIn("artifact://", trimmed[0]["content"])
+        self.assertEqual(compactor.prepare(trimmed, "继续工作"), trimmed)
+        with self.db.transaction() as c:
+            pid = self.session["project_id"]
+            self.assertEqual(c.execute(select(func.count()).select_from(artifacts).where(artifacts.c.project_id == pid)).scalar(), 2)
+        # 新建读取对象仍能找回正文；分页输出不会重新塞回全部结果。
+        with patch.object(workspace, "WORKDIR", self.workdir):
+            read = run_read(reference, start_line=9999, limit=2)
+        self.assertIn("9999 | 检索结果", read)
+        self.assertNotIn("后续内容未读取", read)
+
+    def test_archive_reads_enforce_project_scope_and_output_bounds(self):
+        from context.compactor import ContextCompactor
+        from tool import workspace
+        self.enterContext(patch.object(workspace, "WORKDIR", self.workdir))
+        from tool.read_file import run_read, MAX_OUTPUT_CHARS
+        compactor = ContextCompactor(None, "mock", self.workdir / ".transcripts", self.workdir / ".task_outputs/tool-results")
+        reference = str(compactor.save_output("wide", "私有结果" * 100000))
+        with patch.object(workspace, "WORKDIR", self.workdir):
+            output = run_read(reference)
+            self.assertIn("行内内容已截断", output)
+            self.assertLess(len(output), MAX_OUTPUT_CHARS + 200)
+            self.assertTrue(run_read("artifact://invalid").startswith("错误："))
+            self.assertTrue(run_read("artifact://" + "f" * 32).startswith("错误："))
+        with patch.object(workspace, "WORKDIR", self.workdir / "another-project"):
+            denied = run_read(reference)
+            self.assertTrue(denied.startswith("错误："))
+            self.assertNotIn("私有结果", denied)
+
+    def test_microcompact_database_results_keep_previews_and_recent_three(self):
+        from context.compactor import ContextCompactor
+        from tool import workspace
+        from tool.read_file import run_read
+        history = [dict(role="user", content="阅读项目")]
+        for n in range(10):
+            history.extend([
+                dict(role="assistant", content=[dict(type="tool_use", id=f"read_{n}", name="read_file", input={"path": "file.py"})]),
+                dict(role="user", content=[dict(type="tool_result", tool_use_id=f"read_{n}", content=str(n) * 50000)]),
+            ])
+        compactor = ContextCompactor(None, "mock", self.workdir / ".transcripts", self.workdir / ".task_outputs/tool-results")
+        prepared = compactor.prepare(history, "阅读项目")
+        results = [message["content"][0] for message in prepared if compactor.is_tool_result(message)]
+        for n, result in enumerate(results[:7]):
+            reference = compactor.persisted_output_path(result["content"])
+            self.assertTrue(reference.startswith("artifact://"))
+            self.assertIn(str(n) * 400, result["content"])
+            self.assertNotIn(str(n) * 401, result["content"])
+            with patch.object(workspace, "WORKDIR", self.workdir):
+                self.assertIn(str(n) * 1000, run_read(reference))
+        self.assertEqual([result["content"] for result in results[7:]], [str(n) * 50000 for n in range(7, 10)])
+        self.assertFalse((self.workdir / ".task_outputs").exists())
+        self.assertFalse((self.workdir / ".transcripts").exists())
+
+    def test_main_and_subagent_read_compacted_database_outputs(self):
+        from tool import workspace
+        from tests.test_compact_loop import parent, subagent, response, text_response, tool
+        from tests.memory_support import isolate_memory
+        from storage.context import storage_scope
+        from unittest.mock import Mock
+        import re
+        isolate_memory(self, parent)
+        original = "工具结果明细\n" * 60000
+        with patch.object(workspace, "WORKDIR", self.workdir), patch.dict(os.environ, {"GITHUB_MCP_ENABLED": "false"}):
+            for module, handlers in ((parent, parent.TOOL_HANDLERS), (subagent, subagent.SUB_HANDLERS)):
+                requests = []
+                def reply(**body):
+                    requests.append(body)
+                    if len(requests) == 1:
+                        return response([tool("huge", "bash", command="fake-large-output")])
+                    if len(requests) == 2:
+                        output = body["messages"][-1]["content"][0]["content"]
+                        reference = re.search(r"artifact://[0-9a-f]{32}", output).group()
+                        return response([tool("recover", "read_file", path=reference, start_line=19999, limit=2)])
+                    self.assertIn("19999 | 工具结果明细", body["messages"][-1]["content"][0]["content"])
+                    return text_response("已找回归档，任务完成")
+                client = Mock()
+                client.messages.create.side_effect = reply
+                with patch.object(module, "client", client), patch.dict(handlers, {"bash": lambda command: original}), \
+                        storage_scope(session_id=self.session["id"]):
+                    if module is parent:
+                        module.agent_loop([dict(role="user", content="查阅明细")], "查阅明细")
+                    else:
+                        self.assertEqual(module.run_subagent("查阅明细"), "已找回归档，任务完成")
+                self.assertEqual(len(requests), 3)
+        self.assertFalse((self.workdir / ".transcripts").exists())
+        self.assertFalse((self.workdir / ".task_outputs").exists())
+
+    def test_database_archive_paging_matches_file_tool(self):
+        from context.compactor import ContextCompactor
+        from tool import workspace
+        from tool.read_file import run_read
+        compactor = ContextCompactor(None, "mock", self.workdir / ".transcripts", self.workdir / ".task_outputs/tool-results")
+        samples = ("", "one", "一\r\n二\r\n三\r\n", "\ufeff开头\n\n末尾", "x\n" * 1005,
+                   "超长行" * 50000 + "\n尾行\n", "binary\x00data")
+        with patch.object(workspace, "WORKDIR", self.workdir):
+            for index, text in enumerate(samples):
+                path = self.workdir / f"plain_{index}.txt"
+                path.write_bytes(text.encode("utf-8"))
+                reference = str(compactor.save_output(str(index), text))
+                for options in ({}, {"start_line": 2, "limit": 2}, {"start_line": 999, "end_line": 1005}):
+                    with self.subTest(sample=index, options=options):
+                        self.assertEqual(run_read(reference, **options), run_read(str(path), **options))
+
+    def test_legacy_file_archive_remains_readable(self):
+        from storage.artifacts import register_file
+        from storage.models import artifacts
+        from sqlalchemy import select
+        from context.compactor import ContextCompactor
+        from tool import workspace
+        from tool.read_file import run_read
+        old = self.workdir / ".task_outputs/tool-results/old.txt"
+        old.parent.mkdir(parents=True)
+        old.write_text("旧正文\n仍可读取\n", encoding="utf-8")
+        register_file(self.db, self.workdir, old, "tool_result")
+        compactor = ContextCompactor(None, "mock", self.workdir / ".transcripts", old.parent)
+        marker = f"[早期工具结果已保存至 {old}]"
+        self.assertEqual(compactor.persisted_output_path(marker), str(old))
+        with self.db.transaction() as c:
+            row = c.execute(select(artifacts).where(artifacts.c.project_id == self.session["project_id"])).mappings().one()
+            self.assertIsNone(row["content"])
+            self.assertEqual(row["path"], str(old))
+        with patch.object(workspace, "WORKDIR", self.workdir):
+            self.assertEqual(run_read(str(old)), "1 | 旧正文\n2 | 仍可读取")
+
 
 if __name__ == "__main__":
     unittest.main()

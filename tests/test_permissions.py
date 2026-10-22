@@ -36,6 +36,16 @@ class PermissionTests(unittest.TestCase):
                 self.assertFalse(permission.check_permission(tool_call("bash", command=command)))
                 prompt.assert_not_called()
 
+    def test_database_archive_references_are_readonly_and_validate_identifiers(self):
+        reference = "artifact://" + "a" * 32
+        with patch("builtins.input") as prompt:
+            self.assertTrue(permission.check_permission(tool_call("read_file", path=reference)))
+            for name in ("write_file", "edit_file"):
+                self.assertFalse(permission.check_permission(tool_call(name, path=reference)))
+            for path in ("artifact://../outside", "artifact://invalid", "artifact://"):
+                self.assertFalse(permission.check_permission(tool_call("read_file", path=path)))
+            prompt.assert_not_called()
+
     def test_normal_workspace_operations_are_allowed_without_prompting(self):
         calls = [
             tool_call("read_file", path="demo.txt"),

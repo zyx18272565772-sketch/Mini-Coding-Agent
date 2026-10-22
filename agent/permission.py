@@ -5,6 +5,7 @@ import re
 
 from agent.events import ask_approval
 from tool import workspace
+from storage.references import artifact_id, is_artifact_reference
 
 
 DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if=", "> /dev/sda"]
@@ -50,6 +51,10 @@ PERMISSION_RULES = [
 
 
 def check_rules(tool_name: str, args: dict) -> str | None:
+    if tool_name == "read_file" and is_artifact_reference(args.get("path")):
+        artifact_id(args["path"])
+        # 实际读取由归档仓储按当前项目校验，不把数据库编号解析成文件路径。
+        return None
     for rule in PERMISSION_RULES:
         if tool_name in rule["tools"] and rule["check"](args):
             return rule["message"]
@@ -73,6 +78,9 @@ def ask_user(tool_name: str, args: dict, reason: str) -> str:
 def check_permission(block) -> bool:
     if not isinstance(block.input, dict):
         print("\n[已阻止] 工具参数必须是字典对象")
+        return False
+    if block.name in ("write_file", "edit_file") and is_artifact_reference(block.input.get("path")):
+        print("\n[已阻止] 数据库归档只读，不能通过文件写入或编辑工具修改")
         return False
     if block.name.startswith("mcp__"):
         from mcp_client.runtime import current_mcp

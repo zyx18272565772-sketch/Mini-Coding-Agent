@@ -31,7 +31,7 @@ BASE_TOOLS = [   #给模型看的，主智能体和子智能体共用的工具
     },
     {
         "name": "read_file",
-        "description": "按行读取 UTF-8 文件，返回行号与原文。start_line/end_line 从 1 开始且包含结束行；也可用 limit 指定行数，但不能与 end_line 同用。默认 200 行，最多 1000 行及约 20000 字符，截断时返回后续起始行。行号不是源码，编辑时不要复制行号。",
+        "description": "按行读取 UTF-8 文件或 artifact://编号 对应的当前项目数据库归档，返回行号与原文。start_line/end_line 从 1 开始且包含结束行；也可用 limit 指定行数，但不能与 end_line 同用。默认 200 行，最多 1000 行及约 20000 字符，截断时返回后续起始行。行号不是源码，编辑时不要复制行号。",
         "input_schema": {
             "type": "object",
             "properties": {

@@ -52,6 +52,8 @@ GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, REFERENCES
 
 `upgrade` 使用 Alembic 创建业务表和 `alembic_version` 版本表；不会创建数据库本身，也不提供自动删表降级。首次初始化应使用专用空数据库。MySQL 的 DDL 不保证整体回滚，如果首次初始化中断并留下部分表，请检查错误，在新的专用空数据库上重试，不要对已有业务库执行删表清理。成功后重复 `upgrade` 不会重建表。
 
+已使用第一版数据库的项目也执行同一个 `upgrade` 命令。迁移 `0002_artifact_content` 为 `artifacts` 增加正文和行数字段，允许新归档不设置文件路径；保留已有数据和编号。建表和升级 SQL 均可在 `storage/migrations/versions/` 查看。
+
 未设置连接参数、版本未初始化、认证失败或断开连接都会明确报错。选择 MySQL 后不会悄悄写回 JSON，避免产生两份数据。
 
 ## 4. 导入旧文件（如需保留原历史）
@@ -87,7 +89,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, REFERENCES
 | `project_tasks` | 同项目共享的任务、状态与领取者 |
 | `task_dependencies` | 项目内的任务依赖边 |
 | `memories` | 结构化长期记忆、正文、版本及可确定的来源 |
-| `artifacts` | 本地压缩归档、大型工具输出的路径、归属、大小与校验值 |
+| `artifacts` | 新压缩归档及大型工具输出的正文、行数、归属、大小与校验值；兼容旧文件元数据 |
 
 聊天原文和执行事件不随模型上下文压缩删除。检查点仅在内容变化时写入，流式片段先供界面轮询，在完整回复、检查点或运行结束时批量持久化；进程崩溃前尚未保存的片段可能丢失。
 
@@ -95,7 +97,11 @@ GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, REFERENCES
 
 删除会话会删除其原文、事件、检查点和运行用量，释放它领取但未完成的任务；项目任务和记忆仍保留。删除项目会隐藏项目并删除其会话，保留源文件及项目级知识；重新添加同一目录会恢复原项目 ID。归档文件不会自动删除。
 
-外观设置、本地源码、技能文件和大型归档仍在磁盘中。MySQL 不意味着可以只备份数据库而丢掉这些文件。Redis 未接入，也不参与会话恢复。
+新工具输出和压缩归档保存在 `artifacts.content`，不再生成本地归档目录。上下文中使用 `artifact://编号` 引用，模型仍调用 `read_file`，通过 `start_line`、`end_line` 或 `limit` 分页读取；查询在数据库端定位行并截取有界片段，返回长度沿用文件工具限制。每次读取按当前项目过滤，不能读取其他项目的归档；归档编号不包含连接凭据，也不能用于 `write_file` 或 `edit_file`。
+
+`session_events` 保留执行当时的工具结果，`artifacts` 保存压缩时需要独立取回的归档正文，因此目前仍可能保存相同文本的多个副本。归档使用不可变的新编号，避免主、子 Agent 或不同运行中同名工具调用覆盖历史正文。
+
+外观设置、本地源码和技能文件仍在磁盘中。旧 `.task_outputs`、`.transcripts` 中的已有文件不自动转入数据库，旧会话可以继续按原路径读取；备份旧会话时应保留这些被引用的文件。Redis 未接入，也不参与会话恢复。
 
 ## 测试
 

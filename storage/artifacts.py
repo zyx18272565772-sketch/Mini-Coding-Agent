@@ -1,10 +1,72 @@
-"""大文件保留本地，数据库登记归属、路径、大小和校验值。"""
+"""归档正文存入 MySQL；旧文件记录保留用于历史兼容。"""
 import hashlib
 from pathlib import Path
 from uuid import uuid4
 
-from storage.config import storage_backend
 from storage.context import current_context
+from storage.references import artifact_id, PREFIX
+
+
+class SQLArtifactStore:
+    def __init__(self, database, workdir):
+        self.database = database
+        self.workdir = Path(workdir).resolve()
+
+    def save(self, kind, content):
+        from storage.database import utcnow
+        from storage.models import artifacts
+        from storage.projects import ensure_project
+        if kind not in ("tool_result", "transcript") or not isinstance(content, str):
+            raise ValueError("归档类型或正文无效")
+        scope = current_context()
+        raw = content.encode("utf-8")
+        identifier = uuid4().hex
+        with self.database.transaction() as c:
+            pid = ensure_project(c, self.workdir)
+            c.execute(artifacts.insert().values(id=identifier, project_id=pid,
+                session_id=scope.get("session_id"), run_id=scope.get("run_id"), kind=kind,
+                path=None, path_key=None, content=content,
+                line_count=content.count("\n") + int(bool(content) and not content.endswith("\n")),
+                size_bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest(), created_at=utcnow()))
+        return PREFIX + identifier
+
+    def _where(self, reference):
+        from sqlalchemy import select
+        from storage.database import path_key
+        from storage.models import artifacts, projects
+        # 每次读取都以工作目录对应的项目限制查询，知道别人的编号也不能越界读取。
+        pid = select(projects.c.id).where(projects.c.path_key == path_key(self.workdir)).scalar_subquery()
+        return (artifacts.c.id == artifact_id(reference), artifacts.c.project_id == pid,
+                artifacts.c.content.is_not(None))
+
+    def exists(self, reference, kind):
+        from sqlalchemy import select
+        from storage.models import artifacts
+        try:
+            where = self._where(reference)
+        except ValueError:
+            return False
+        with self.database.transaction() as c:
+            return c.execute(select(artifacts.c.id).where(*where, artifacts.c.kind == kind)).first() is not None
+
+    def read_chunk(self, reference, *, start_line=1, max_chars=80001):
+        """在数据库端定位行并截取有界片段，避免分页时把整个 LONGTEXT 传回进程。"""
+        from sqlalchemy import func, literal, select
+        from storage.models import artifacts
+        if type(start_line) is not int or start_line < 1 or type(max_chars) is not int or not 1 <= max_chars <= 80001:
+            raise ValueError("归档读取范围无效")
+        offset = literal(1) if start_line == 1 else func.char_length(func.substring_index(
+            artifacts.c.content, "\n", start_line - 1)) + 2
+        chunk = func.substring(artifacts.c.content, offset, max_chars)
+        more = func.char_length(artifacts.c.content) >= offset + max_chars
+        with self.database.transaction() as c:
+            row = c.execute(select(chunk, more).where(*self._where(reference))).first()
+        if row is None:
+            raise ValueError("归档不存在、仅保存了旧文件信息，或不属于当前项目")
+        return row[0], bool(row[1])
+
+    def read_preview(self, reference, max_chars):
+        return self.read_chunk(reference, max_chars=max_chars)[0]
 
 
 def register_file(database, workdir, path, kind, *, scope=None, connection=None):
@@ -32,11 +94,3 @@ def register_file(database, workdir, path, kind, *, scope=None, connection=None)
     else:
         with database.transaction() as c:
             save(c)
-
-
-def record_artifact(path, kind):
-    if storage_backend() != "mysql":
-        return
-    from storage.factory import mysql_database
-    from tool import workspace
-    register_file(mysql_database(), workspace.WORKDIR, path, kind, scope=current_context())

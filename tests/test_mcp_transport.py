@@ -52,6 +52,8 @@ class MCPTransportTests(unittest.TestCase):
         with patch("httpx2.AsyncClient", side_effect=client_factory):
             with github_mcp_scope(config=config) as runtime:
                 self.assertIsNotNone(runtime)
+                self.assertEqual(requests, [])
+                self.assertFalse(runtime.handlers["load_mcp"](server="github").is_error)
                 output = runtime.handlers["mcp__github__list_issues"](owner="someone", repo="demo")
                 self.assertIn("通过真实 MCP 协议返回的 Issue", output)
                 self.assertFalse(output.is_error)
@@ -85,7 +87,8 @@ class MCPTransportTests(unittest.TestCase):
         for error in (httpx2.ReadTimeout("offline timeout"), SystemExit(0)):
             with self.subTest(error=type(error).__name__), patch("httpx2.AsyncClient", side_effect=client_factory):
                 try:
-                    with github_mcp_scope(config=GitHubConfig(token="offline", tools=("list_issues",))):
+                    with github_mcp_scope(config=GitHubConfig(token="offline", tools=("list_issues",))) as runtime:
+                        self.assertFalse(runtime.handlers["load_mcp"](server="github").is_error)
                         raise error
                 except BaseException as received:
                     self.assertIs(received, error, "SDK 清理不能将 Agent 异常包装成 ExceptionGroup")

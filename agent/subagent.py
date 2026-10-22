@@ -44,6 +44,7 @@ def _run_subagent_loop(prompt: str, background: BackgroundManager, mcp=None) -> 
     compactor = ContextCompactor(
         client, MODEL, workspace.WORKDIR / ".transcripts",
         workspace.WORKDIR / ".task_outputs" / "tool-results",
+        tools=tools,
     )
     reactive_retries = 0
     while True:
@@ -84,15 +85,17 @@ def _run_subagent_loop(prompt: str, background: BackgroundManager, mcp=None) -> 
         compact_requested = False
         for block in tool_calls:
             output, allowed = execute_tool(block, handlers, background=background)
+            tools, handlers = extend_tools(SUB_TOOLS, SUB_HANDLERS, mcp)
+            compactor.tools = tools
             if allowed and block.name == "compact" and output == COMPACT_REQUESTED:
                 compact_requested = True
             print(f"  [子工具] {block.name}：{output[:100]}")
             result = {
                 "type": "tool_result",
                 "tool_use_id": block.id,
-                "content": str(output),
+                "content": compactor.persist_large_output(block.id, str(output)),
             }
-            if getattr(output, "is_error", False) or (block.name.startswith("mcp__") and not allowed):
+            if getattr(output, "is_error", False) or (not allowed and (block.name == "read_file" or block.name.startswith("mcp__"))):
                 result["is_error"] = True
             results.append(result)
         messages.append({"role": "user", "content": results})
